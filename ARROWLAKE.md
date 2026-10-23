@@ -1,7 +1,8 @@
 # btop 1.4.7+arrowlake
 
-This branch is upstream btop v1.4.7 plus one commit. It makes the Intel Arrow Lake integrated GPU
-show up properly, and it fixes the layout when two GPUs are shown. Everything else is upstream.
+This branch is upstream btop v1.4.7 plus one code commit, and this notes file. It makes the Intel
+Arrow Lake integrated GPU show up properly, and it fixes the layout when two GPUs are shown.
+Everything else is upstream. Other i915 GPUs take the same code paths, but only Arrow Lake was tested.
 For btop itself, read [README.md](README.md).
 
 The version string reads `1.4.7+arrowlake.7`. The `+arrowlake.N` part is semver build metadata.
@@ -47,15 +48,31 @@ build ran on Debian 13 with `build-essential` (g++ 14) in a `debian:trixie-slim`
 ## Runtime requirements on Linux
 
 - **Kernel perf access.** Intel GPU load comes from the i915 PMU. Without root, that needs
-  `cap_perfmon` and `kernel.perf_event_paranoid` set to 2 or lower. Debian ships 3.
+  `cap_perfmon` and `kernel.perf_event_paranoid` set to 2 or lower. Debian 13 ships 3. When
+  the level is too high, the load reads 0% and btop's debug log says
+  `Intel GPU: Failed to initialize PMU`. To set the level and keep it across reboots:
+
+  ```sh
+  echo kernel.perf_event_paranoid=2 | sudo tee /etc/sysctl.d/60-perf-event-paranoid.conf
+  sudo sysctl --system
+  ```
 - **Power.** The RAPL `energy_uj` file can only be read by root. `cap_dac_read_search` covers it.
 - **Memory bandwidth.** The TX/RX row needs `libi915_perf.so.1.5` from `intel-gpu-tools` 2.0.
-  btop loads it with `dlopen` while running, so btop still works without it. You also need
-  `dev.i915.perf_stream_paranoid` set to 1, its default.
+  On Debian 13, install it with `sudo apt install intel-gpu-tools`. btop loads it with `dlopen`
+  while running, so btop still works without it. You also need `dev.i915.perf_stream_paranoid`
+  set to 1, its default. The row stays hidden while any of these is missing:
+  - the library;
+  - the `ComputeBasic` metric set, on a GPU that lacks it;
+  - an openable DRM node;
+  - a free OA stream.
   - Only one OA stream can run per GPU. A second btop, or `i915-perf-recorder`, waits and retries
     every 10 s, and its row stays hidden until then.
   - btop tries the render node first. If the user cannot open it, as in an ssh or kiosk session
-    outside the `render` group, btop tries the card node through `video`.
+    outside the `render` group, btop tries the card node through `video`. Run `id` to see which
+    of the two groups the user is in. With neither group, run btop as root or add the user to
+    `video`.
+  - To find out why the row is hidden, run btop with `--debug` and read the
+    `Intel GPU:` lines in its log.
 - **Memory used.** This total counts only the processes whose `/proc/<pid>/fdinfo` btop can read.
   Run btop as the user that owns the GPU workload, or as root, to see all of it.
 - **Temperature.** Not shown, because Linux exposes no i915 temperature sensor for this iGPU.
