@@ -17,6 +17,7 @@ tab-size = 4
 */
 
 #include <algorithm>
+#include <cstring>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
@@ -26,6 +27,7 @@ tab-size = 4
 #include <iterator>
 #include <numeric>
 #include <optional>
+#include <sstream>
 #include <ranges>
 #include <string_view>
 #include <unordered_map>
@@ -68,7 +70,11 @@ tab-size = 4
 	#define class class_
 extern "C" {
 	#include "intel_gpu_top/intel_gpu_top.h"
+	#include "intel_gpu_top/i915_drm.h"
+	#include "intel_gpu_top/i915_perf_abi.h"
 }
+	#include <fcntl.h>
+	#include <sys/ioctl.h>
 	#undef class
 
 	#if defined(__clang__)
@@ -287,6 +293,7 @@ namespace Gpu {
 	namespace Intel {
 		const char* device = "i915";
 		struct engines *engines = nullptr;
+		fs::path rapl_gpu_energy;
 
 		bool initialized = false;
 		bool init();
@@ -1883,6 +1890,195 @@ namespace Gpu {
 	}
 
 	namespace Intel {
+		constexpr unsigned int engine_class_video = 2; //? I915_ENGINE_CLASS_VIDEO in intel_gpu_top/i915_drm.h
+
+		//? GPU memory in use: every i915 client's resident memory, read from /proc/<pid>/fdinfo; drm-client-id counts a shared fd once
+		static long long mem_used_bytes() {
+			long long total = 0;
+			std::unordered_set<string> clients;
+			std::error_code ec;
+			for (const auto& proc : fs::directory_iterator("/proc", ec)) {
+				const auto pid = proc.path().filename().string();
+				if (pid.empty() or not isdigit(pid[0])) continue;
+				std::error_code fd_ec;
+				for (const auto& fd : fs::directory_iterator(proc.path() / "fd", fd_ec)) {
+					std::error_code link_ec;
+					if (not fs::read_symlink(fd.path(), link_ec).string().starts_with("/dev/dri/")) continue;
+					std::ifstream info(proc.path() / "fdinfo" / fd.path().filename());
+					string client;
+					long long bytes = 0;
+					bool i915 = false;
+					for (string line; std::getline(info, line);) {
+						const auto colon = line.find(':');
+						if (colon == string::npos) continue;
+						const string key = line.substr(0, colon);
+						std::istringstream value(line.substr(colon + 1));
+						if (key == "drm-driver") {
+							string driver;
+							value >> driver;
+							i915 = (driver == "i915");
+						} else if (key == "drm-client-id") {
+							value >> client;
+						} else if (key.starts_with("drm-resident-")) {
+							long long amount = 0;
+							string unit;
+							value >> amount >> unit;
+							bytes += amount * (unit == "KiB" ? 1024LL : unit == "MiB" ? 1024LL * 1024 : unit == "GiB" ? 1024LL * 1024 * 1024 : 1LL);
+						}
+					}
+					if (i915 and not client.empty() and clients.insert(client).second)
+						total += bytes;
+				}
+			}
+			return total;
+		}
+
+		//? GPU memory bandwidth from the i915 OA unit: GTI read/write bytes of the ComputeBasic metric set.
+		//? libi915_perf (igt-gpu-tools) holds the per-chip metric definitions; it is loaded at runtime, so btop runs without it.
+		//? The kernel allows one OA stream at a time: a second btop, or i915-perf-recorder, gets EBUSY and retries later.
+		namespace OA {
+			using perf_for_fd_t = intel_perf* (*)(int, int);
+			using load_configs_t = void (*)(intel_perf*, int);
+			using accumulate_t = void (*)(intel_perf_accumulator*, const intel_perf*, const intel_perf_metric_set*,
+										  const drm_i915_perf_record_header*, const drm_i915_perf_record_header*);
+
+			void* lib = nullptr;
+			accumulate_t accumulate = nullptr;
+			intel_perf* perf = nullptr;
+			intel_perf_metric_set* metric_set = nullptr;
+			const intel_perf_logical_counter *rd = nullptr, *wr = nullptr, *gpu_time = nullptr;
+			int drm_fd = -1, stream_fd = -1;
+			uint64_t oa_exponent = 0;
+			uint64_t retry_at = 0; //? ms; open retries while another stream holds the unit
+			vector<uint8_t> last; //? the previous sample record, header included
+			intel_perf_accumulator acc{};
+			bool unavailable = false;
+
+			//? The render node first, then the card node: a user outside the "render" group (an ssh or kiosk session gets no
+			//? seat ACL) can still open the card node through "video", and OA open is allowed there without DRM master
+			static int open_drm_node() {
+				for (const string prefix : {"renderD", "card"}) {
+					std::error_code ec;
+					for (const auto& node : fs::directory_iterator("/sys/class/drm", ec)) {
+						const auto name = node.path().filename().string();
+						if (not name.starts_with(prefix) or name.find('-') != string::npos) continue;
+						std::error_code link_ec;
+						if (fs::read_symlink(node.path() / "device" / "driver", link_ec).filename() != "i915") continue;
+						int fd = open(("/dev/dri/" + name).c_str(), O_RDWR | O_CLOEXEC);
+						if (fd >= 0) return fd;
+					}
+				}
+				return -1;
+			}
+
+			static bool setup() {
+				//? igt-gpu-tools 2.0 ships the soname libi915_perf.so.1.5; the unversioned name is the fallback
+				for (const char* name : {"libi915_perf.so.1.5", "libi915_perf.so"}) {
+					if ((lib = dlopen(name, RTLD_NOW | RTLD_LOCAL))) break;
+				}
+				if (not lib) {
+					Logger::debug("Intel GPU: libi915_perf not found, memory bandwidth not shown");
+					return false;
+				}
+				auto for_fd = reinterpret_cast<perf_for_fd_t>(dlsym(lib, "intel_perf_for_fd"));
+				auto load_configs = reinterpret_cast<load_configs_t>(dlsym(lib, "intel_perf_load_perf_configs"));
+				accumulate = reinterpret_cast<accumulate_t>(dlsym(lib, "intel_perf_accumulate_reports"));
+				if (not for_fd or not load_configs or not accumulate) { Logger::debug("Intel GPU: libi915_perf lacks an expected symbol"); return false; }
+
+				drm_fd = open_drm_node();
+				if (drm_fd < 0) { Logger::debug("Intel GPU: no i915 DRM node opened for OA"); return false; }
+				perf = for_fd(drm_fd, 0);
+				if (not perf) { Logger::debug("Intel GPU: libi915_perf does not know this GPU"); return false; }
+				load_configs(perf, drm_fd); //? registers the metric sets with the kernel; needs CAP_PERFMON at perf_stream_paranoid 1
+
+				for (auto* link = perf->metric_sets.next; link and link != &perf->metric_sets; link = link->next) {
+					auto* set = reinterpret_cast<intel_perf_metric_set*>(reinterpret_cast<char*>(link) - offsetof(intel_perf_metric_set, link));
+					if (set->symbol_name and string_view(set->symbol_name) == "ComputeBasic") metric_set = set;
+				}
+				if (not metric_set or metric_set->perf_oa_metrics_set == 0) {
+					Logger::debug("Intel GPU: OA metric set ComputeBasic unavailable, memory bandwidth not shown");
+					return false;
+				}
+				for (int i = 0; i < metric_set->n_counters; i++) {
+					const auto& c = metric_set->counters[i];
+					if (not c.symbol_name) continue;
+					const string_view sym = c.symbol_name;
+					if (sym == "GtiReadThroughput") rd = &c;
+					else if (sym == "GtiWriteThroughput") wr = &c;
+					else if (sym == "GpuTime") gpu_time = &c;
+				}
+				if (not rd or not wr or not gpu_time) { Logger::debug("Intel GPU: ComputeBasic lacks the GTI or GpuTime counters"); return false; }
+
+				//? About 100 ms between OA reports: the exponent picks period = 2^(exponent+1) / timestamp frequency
+				int freq = 0;
+				drm_i915_getparam_t gp{};
+				gp.param = I915_PARAM_OA_TIMESTAMP_FREQUENCY;
+				gp.value = &freq;
+				if (ioctl(drm_fd, DRM_IOCTL_I915_GETPARAM, &gp) != 0 or freq <= 0) { Logger::debug("Intel GPU: OA timestamp frequency unreadable"); return false; }
+				oa_exponent = 0;
+				while (oa_exponent < 31 and (double)(2ull << oa_exponent) / freq < 0.1) oa_exponent++;
+				return true;
+			}
+
+			static bool open_stream() {
+				uint64_t props[] = {
+					DRM_I915_PERF_PROP_SAMPLE_OA, 1,
+					DRM_I915_PERF_PROP_OA_METRICS_SET, metric_set->perf_oa_metrics_set,
+					DRM_I915_PERF_PROP_OA_FORMAT, (uint64_t)metric_set->perf_oa_format,
+					DRM_I915_PERF_PROP_OA_EXPONENT, oa_exponent,
+				};
+				drm_i915_perf_open_param param{};
+				param.flags = I915_PERF_FLAG_FD_CLOEXEC | I915_PERF_FLAG_FD_NONBLOCK;
+				param.num_properties = sizeof(props) / sizeof(props[0]) / 2;
+				param.properties_ptr = (uintptr_t)props;
+				stream_fd = ioctl(drm_fd, DRM_IOCTL_I915_PERF_OPEN, &param);
+				if (stream_fd < 0) {
+					Logger::debug("Intel GPU: OA stream not opened ({}), retrying in 10 s", strerror(errno));
+					retry_at = Tools::time_ms() + 10'000;
+					return false;
+				}
+				last.clear();
+				acc = {};
+				return true;
+			}
+
+			//? Bytes per second read and written by the GPU since the last call; false while no stream is open
+			static bool sample(double& read_bps, double& write_bps) {
+				if (unavailable) return false;
+				if (not perf and not setup()) {
+					unavailable = true;
+					return false;
+				}
+				if (stream_fd < 0 and (Tools::time_ms() < retry_at or not open_stream())) return false;
+
+				static vector<uint8_t> buf(1 << 20);
+				for (;;) {
+					const auto n = read(stream_fd, buf.data(), buf.size());
+					if (n < 0 and errno == EINTR) continue;
+					if (n <= 0) break; //? EAGAIN: drained
+					for (size_t off = 0; off + sizeof(drm_i915_perf_record_header) <= (size_t)n;) {
+						const auto* hdr = reinterpret_cast<const drm_i915_perf_record_header*>(buf.data() + off);
+						if (hdr->size < sizeof(drm_i915_perf_record_header) or off + hdr->size > (size_t)n) break;
+						if (hdr->type == DRM_I915_PERF_RECORD_SAMPLE) {
+							if (not last.empty())
+								accumulate(&acc, perf, metric_set, reinterpret_cast<const drm_i915_perf_record_header*>(last.data()), hdr);
+							last.assign(buf.data() + off, buf.data() + off + hdr->size);
+						} else {
+							last.clear(); //? report or buffer lost: do not bridge the gap
+						}
+						off += hdr->size;
+					}
+				}
+
+				const uint64_t ns = gpu_time->read_uint64(perf, metric_set, acc.deltas);
+				if (ns == 0) return false;
+				read_bps = (double)rd->read_uint64(perf, metric_set, acc.deltas) * 1e9 / (double)ns;
+				write_bps = (double)wr->read_uint64(perf, metric_set, acc.deltas) * 1e9 / (double)ns;
+				acc = {};
+				return true;
+			}
+		}
+
 		bool init() {
 			if (initialized) return false;
 
@@ -1918,6 +2114,23 @@ namespace Gpu {
 			}
 
 			pmu_sample(engines);
+
+			//? No perf energy-gpu event (Arrow Lake, for one): use the powercap RAPL "uncore" domain, the graphics plane on client parts
+			if (not engines->r_gpu.present) {
+				std::error_code ec;
+				for (const auto& dir : fs::directory_iterator("/sys/class/powercap", ec)) {
+					const auto name = dir.path().filename().string();
+					if (not name.starts_with("intel-rapl:0:")) continue;
+					std::ifstream name_file(dir.path() / "name");
+					string domain;
+					if (name_file >> domain and domain == "uncore" and std::ifstream(dir.path() / "energy_uj").good()) {
+						rapl_gpu_energy = dir.path() / "energy_uj";
+						break;
+					}
+				}
+				if (rapl_gpu_energy.empty())
+					Logger::debug("Intel GPU: no energy-gpu event and no readable RAPL uncore domain, power not shown");
+			}
 
 			device_count = 1;
 
@@ -1957,33 +2170,71 @@ namespace Gpu {
 					.mem_utilization = false,
 					.gpu_clock = true,
 					.mem_clock = false,
-					.pwr_usage = true,
+					.pwr_usage = engines->r_gpu.present or not rapl_gpu_energy.empty(),
 					.pwr_state = false,
 					.temp_info = false,
-					.mem_total = false,
-					.mem_used = false,
-					.pcie_txrx = false,
+					.mem_total = true,
+					.mem_used = true,
+					.pcie_txrx = true,
 					.encoder_utilization = false,
 					.decoder_utilization = false
 				};
+				//? An integrated GPU has no PCIe link: TX/RX carry its memory traffic, TX = bytes the GPU writes, RX = bytes it reads
+
+				//? Intel's video engine does both encode and decode, so ENC and DEC show the same video-engine load
+				for (unsigned int i = 0; i < engines->num_engines; i++) {
+					if ((&engines->engine)[i].class_ == engine_class_video) {
+						gpus_slice->supported_functions.encoder_utilization = true;
+						gpus_slice->supported_functions.decoder_utilization = true;
+					}
+				}
 
 				gpus_slice->pwr_max_usage = 10'000; //? 10W
+
+				//? Shared memory: total is half of system RAM, the heap Mesa's Vulkan driver advertises for this iGPU (measured on the Ultra, Mesa 25.0)
+				std::ifstream meminfo("/proc/meminfo");
+				string key;
+				long long kib = 0;
+				while (meminfo >> key >> kib and key != "MemTotal:")
+					meminfo.ignore(SSmax, '\n');
+				gpus_slice->mem_total = kib * 1024 / 2;
+				if (gpus_slice->mem_total <= 0)
+					gpus_slice->supported_functions.mem_total = false;
 			}
 
 			pmu_sample(engines);
 			double t = (double)(engines->ts.cur - engines->ts.prev) / 1e9;
 
-			double max_util = 0;
+			double max_util = 0, video_util = 0;
 			for (unsigned int i = 0; i < engines->num_engines; i++) {
 				struct engine *engine = &(&engines->engine)[i];
 				double util = pmu_calc(&engine->busy.val, 1e9, t, 100);
 				if (util > max_util) {
 					max_util = util;
 				}
+				if (engine->class_ == engine_class_video and util > video_util) {
+					video_util = util;
+				}
 			}
 			gpus_slice->gpu_percent.at("gpu-totals").push_back((long long)round(max_util));
+			gpus_slice->encoder_utilization = gpus_slice->decoder_utilization = (long long)round(video_util);
+			gpus_slice->mem_used = mem_used_bytes();
+			if (gpus_slice->supported_functions.mem_total)
+				gpus_slice->gpu_percent.at("gpu-vram-totals").push_back(clamp((long long)round((double)gpus_slice->mem_used * 100.0 / (double)gpus_slice->mem_total), 0ll, 100ll));
 
-			double pwr = pmu_calc(&engines->r_gpu.val, 1, t, engines->r_gpu.scale); // in Watts
+			double pwr = 0;
+			if (engines->r_gpu.present) {
+				pwr = pmu_calc(&engines->r_gpu.val, 1, t, engines->r_gpu.scale); // in Watts
+			} else if (not rapl_gpu_energy.empty()) {
+				static long long prev_uj = -1, prev_us = 0;
+				long long uj = -1;
+				std::ifstream(rapl_gpu_energy) >> uj;
+				const long long us = get_monotonicTimeUSec();
+				if (uj >= 0 and prev_uj >= 0 and uj >= prev_uj and us > prev_us)
+					pwr = (double)(uj - prev_uj) / (double)(us - prev_us); //? uJ per uS = W; a counter wrap skips one sample
+				prev_uj = uj;
+				prev_us = us;
+			}
 			gpus_slice->pwr_usage = (long long)round(pwr * 1000);
 			if (gpus_slice->pwr_usage > gpus_slice->pwr_max_usage)
 				gpus_slice->pwr_max_usage = gpus_slice->pwr_usage;
@@ -1992,6 +2243,14 @@ namespace Gpu {
 
 			double freq = pmu_calc(&engines->freq_act.val, 1, t, 1); // in MHz
 			gpus_slice->gpu_clock_speed = (unsigned int)round(freq);
+
+			double read_bps = 0, write_bps = 0;
+			if (OA::sample(read_bps, write_bps)) {
+				gpus_slice->pcie_tx = (long long)round(write_bps / 1024); //? KiB/s, the unit the TX/RX row draws
+				gpus_slice->pcie_rx = (long long)round(read_bps / 1024);
+			} else {
+				gpus_slice->pcie_tx = gpus_slice->pcie_rx = -1; //? hides the row until a stream opens
+			}
 
 			return true;
 		}

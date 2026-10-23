@@ -1000,6 +1000,7 @@ namespace Gpu {
 	int width_p = 100, height_p = 32;
 	int min_width = 41, min_height = 8;
 	int width = 41, total_height;
+	bool side_by_side = false; //? GPU boxes in one row, each a 1/shown-wide column, instead of stacked
 	vector<int> x_vec = {}, y_vec = {}, b_height_vec = {};
 	int b_width;
 	vector<int> b_x_vec = {}, b_y_vec = {};
@@ -1052,10 +1053,10 @@ namespace Gpu {
 			int graph_low_height = single_graph ? 0 : b_height_vec[index] - graph_up_height;
 
 			if (gpu.supported_functions.gpu_utilization) {
-				graph_upper = Draw::Graph{x + width - b_width - 3, graph_up_height, "cpu", safeVal(gpu.gpu_percent, "gpu-totals"s), graph_symbol, false, true}; // TODO cpu -> gpu
+				graph_upper = Draw::Graph{width - b_width - 2, graph_up_height, "cpu", safeVal(gpu.gpu_percent, "gpu-totals"s), graph_symbol, false, true}; // TODO cpu -> gpu
             	if (not single_graph) {
                 	graph_lower = Draw::Graph{
-                    	x + width - b_width - 3,
+                    	width - b_width - 2,
                     	graph_low_height, "cpu",
                     	safeVal(gpu.gpu_percent, "gpu-totals"s),
                     	graph_symbol,
@@ -1101,7 +1102,8 @@ namespace Gpu {
 
 		if (gpu.supported_functions.gpu_clock) {
 			string clock_speed_string = to_string(gpu.gpu_clock_speed);
-			out += Mv::to(b_y, b_x + b_width - 12) + Theme::c("div_line") + Symbols::h_line*(5-clock_speed_string.size())
+			//? One cell further right than upstream: a 4-digit clock still fits, and side by side the GPU name keeps its last letter
+			out += Mv::to(b_y, b_x + b_width - 11) + Theme::c("div_line") + Symbols::h_line*(size_t)max(0, 4 - (int)clock_speed_string.size())
 				+ Symbols::title_left + Fx::b + Theme::c("title") + clock_speed_string + " MHz" + Fx::ub + Theme::c("div_line") + Symbols::title_right;
 		}
 
@@ -2263,9 +2265,13 @@ namespace Draw {
 		// Calculate the minimum possible GPU height, store in total_height
 		// The actual total_height value will of course be overwritten later
 		Gpu::total_height = 0;
+		//? Side by side when every box still gets twice the minimum width: the GPU boxes then cost one row of
+		//? height instead of one per GPU, and the rows go to the boxes below them, the CPU box first
+		Gpu::side_by_side = Gpu::shown > 1 and Term::width / Gpu::shown >= 2 * Gpu::min_width;
 		for (int i = 0; i < Gpu::shown; i++) {
 			using namespace Gpu;
-			total_height += 4 + gpu_b_height_offsets[shown_panels[i]];
+			if (side_by_side) total_height = max(total_height, 4 + gpu_b_height_offsets[shown_panels[i]]);
+			else total_height += 4 + gpu_b_height_offsets[shown_panels[i]];
 		}
 	#endif
 		Mem::shown = boxes.contains("mem");
@@ -2288,9 +2294,19 @@ namespace Draw {
 			if (Gpu::shown != 0 and not (Mem::shown or Net::shown or Proc::shown)) {
 				height = Term::height - Gpu::total_height - gpus_extra_height;
 			} else {
-				height = max(8, (int)ceil((double)Term::height * (trim(boxes) == "cpu" ? 100 : height_p/(Gpu::shown+1) + (Gpu::shown != 0)*5) / 100));
+				height = max(8, (int)ceil((double)Term::height * (trim(boxes) == "cpu" ? 100 : height_p/((Gpu::side_by_side ? 1 : Gpu::shown)+1) + (Gpu::shown != 0)*5) / 100));
 			}
 			if (height <= Term::height-gpus_extra_height) height += gpus_extra_height;
+			{
+				//? With GPU boxes shown the share above can leave the CPU box too short for every core (18 of 24 on a
+				//? 192x49 screen with two GPUs): grow it to the rows the widest core grid that fits still needs.
+				//? The boxes below take their height from Cpu::height, so they shrink to match, never under their minimums.
+				const int max_core_cols = max(1, (width - width / 3) / (8 + 6 * show_temp));
+				const int needed = (int)ceil((double)Shared::coreCount / max_core_cols) + 6 + gpus_extra_height;
+				const int lower_min = max(Proc::shown ? Proc::min_height : 0,
+										  (Mem::shown ? Mem::min_height : 0) + (Net::shown ? Net::min_height : 0));
+				height = max(height, min(needed, Term::height - Gpu::total_height - lower_min));
+			}
 		#else
 			height = max(8, (int)ceil((double)Term::height * (trim(boxes) == "cpu" ? 100 : height_p) / 100));
 		#endif
@@ -2298,7 +2314,8 @@ namespace Draw {
 			y = cpu_bottom ? Term::height - height + 1 : 1;
 
 		#ifdef GPU_SUPPORT
-			b_columns = max(2, (int)ceil((double)(Shared::coreCount + 1) / (height - gpus_extra_height - 5)));
+			//? Rows a column can hold: the box is at most height - 2, and 4 of its rows are borders and load average
+			b_columns = max(2, (int)ceil((double)(Shared::coreCount + 1) / max(1, height - gpus_extra_height - 6)));
 		#else
 			b_columns = max(1, (int)ceil((double)(Shared::coreCount + 1) / (height - 5)));
 		#endif
@@ -2360,15 +2377,17 @@ namespace Draw {
 			pwr_meter_vec.resize(shown);
 			enc_meter_vec.resize(shown);
 			redraw.resize(shown);
+			//? Side by side, every box takes the height of the tallest stats list so the row lines up
+			const int min_total_height = total_height;
 			total_height = 0;
 			for (auto i = 0; i < shown; ++i) {
 				redraw[i] = true;
 				int height = 0;
-				width = Term::width;
+				width = side_by_side ? Term::width / shown : (int)Term::width;
 				if (Cpu::shown)
 					if (not (Mem::shown or Net::shown or Proc::shown))
 						height = min_height;
-					else height = Cpu::height;
+					else height = side_by_side ? min_total_height : (int)Cpu::height; //? side by side: the stats height, the rest stays below
 				else
 					if (not (Mem::shown or Net::shown or Proc::shown))
 						height = (Term::height - total_height) / (Gpu::shown - i) + (i == 0) * ((Term::height - total_height) % (Gpu::shown - i));
@@ -2377,11 +2396,12 @@ namespace Draw {
 
 				b_height_vec[i] = gpu_b_height_offsets[shown_panels[i]] + 2;
 				height += (height+Cpu::height == Term::height-1);
-				height = max(height, b_height_vec[i] + 2);
-				x_vec[i] = 1; y_vec[i] = 1 + total_height + (not Config::getB("cpu_bottom"))*Cpu::shown*Cpu::height;
+				height = max(height, side_by_side ? min_total_height : b_height_vec[i] + 2);
+				x_vec[i] = side_by_side ? 1 + i * width : 1;
+				y_vec[i] = 1 + (side_by_side ? 0 : total_height) + (not Config::getB("cpu_bottom"))*Cpu::shown*Cpu::height;
 				box[i] = createBox(x_vec[i], y_vec[i], width, height, Theme::c("cpu_box"), true, std::string("gpu") + (char)(shown_panels[i]+'0'), "", (shown_panels[i]+5)%10); // TODO gpu_box
 				b_width = clamp(width/2, min_width, 65);
-				total_height += height;
+				total_height = side_by_side ? max(total_height, height) : total_height + height;
 
 				//? Main statistics box
 				b_x_vec[i] = x_vec[i] + width - b_width - 1;

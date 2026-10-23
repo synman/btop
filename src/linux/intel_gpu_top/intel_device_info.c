@@ -482,6 +482,16 @@ static const struct intel_device_info intel_meteorlake_info = {
 	.codename = "meteorlake",
 };
 
+static const struct intel_device_info intel_arrowlake_info = {
+	.graphics_ver = 12,
+	.graphics_rel = 70,
+	.display_ver = 14,
+	.has_4tile = true,
+	.has_oam = true,
+	.is_meteorlake = true,
+	.codename = "arrowlake",
+};
+
 static const struct intel_device_info intel_pontevecchio_info = {
 	.graphics_ver = 12,
 	.graphics_rel = 60,
@@ -610,6 +620,7 @@ static const struct pci_id_match intel_device_match[] = {
 
 	INTEL_ATS_M_IDS(INTEL_VGA_DEVICE, &intel_ats_m_info),
 
+	INTEL_ARL_IDS(INTEL_VGA_DEVICE, &intel_arrowlake_info),
 	INTEL_MTL_IDS(INTEL_VGA_DEVICE, &intel_meteorlake_info),
 
 	INTEL_PVC_IDS(INTEL_VGA_DEVICE, &intel_pontevecchio_info),
