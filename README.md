@@ -1,5 +1,9 @@
 # ![btop++](Img/logo.png)
 
+> **This is the `arrowlake` branch of synman/btop.** It is upstream v1.4.7 plus Intel Arrow Lake iGPU
+> support and multi-GPU layout fixes. See [ARROWLAKE.md](ARROWLAKE.md) for the changes, the build steps
+> and what it needs to run. The rest of this README is upstream's.
+
 <a href="https://repology.org/project/btop/versions">
     <img src="https://repology.org/badge/vertical-allrepos/btop.svg" alt="Packaging status" align="right">
 </a>
