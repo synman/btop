@@ -74,7 +74,17 @@ build ran on Debian 13 with `build-essential` (g++ 14) in a `debian:trixie-slim`
   - To find out why the row is hidden, run btop with `--debug` and read the
     `Intel GPU:` lines in its log.
 - **Memory used.** This total counts only the processes whose `/proc/<pid>/fdinfo` btop can read.
-  Run btop as the user that owns the GPU workload, or as root, to see all of it.
+  The kernel allows that read only where btop could ptrace the process. So a GPU workload run by
+  another user, such as a container's own uid, reads as 0. To see all of it, use one of these:
+  - Run btop as the user that owns the GPU workload, or as root.
+  - Grant btop `cap_sys_ptrace` beside the other two capabilities:
+
+    ```sh
+    sudo setcap "cap_perfmon,cap_dac_read_search,cap_sys_ptrace=+ep" /usr/local/bin/btop
+    ```
+
+    `make setcap` does not add it, because it lets btop attach to any process. Grant it only where
+    you trust the btop binary and its users, such as a single-user kiosk.
 - **Temperature.** Not shown, because Linux exposes no i915 temperature sensor for this iGPU.
 
 ## Tested on
