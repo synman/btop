@@ -86,8 +86,9 @@ build ran on Debian 13 with `build-essential` (g++ 14) in a `debian:trixie-slim`
 
 ## Keeping it current
 
-The code change is one commit on top of the v1.4.7 tag. This file is a second commit. To move
-to a newer upstream release, rebase the branch onto the new tag and rebuild. Check two things after a rebase:
+The code change is one commit on top of the v1.4.7 tag. This file and the README banner come in
+later commits that touch no code. To move to a newer upstream release, rebase the branch onto the
+new tag and rebuild. Check two things after a rebase:
 
 - whether upstream added an Arrow Lake id table entry of its own;
 - whether the layout code in `btop_draw.cpp` moved.
