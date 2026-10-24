@@ -142,7 +142,8 @@ namespace Draw {
 				}
 				if (++z < Global::Banner_src.size()) banner += Mv::l(ulen(line[1])) + Mv::d(1);
 			}
-			banner += Mv::r(18 - Global::Version.size())
+			//? A version of 18 or more characters has no room to align: Mv::r(0) would still move one column
+			banner += (Global::Version.size() < 18 ? Mv::r(18 - Global::Version.size()) : "")
 					+ Theme::c("main_fg") + Fx::b + Fx::i + "v" + Global::Version + Fx::reset;
 		}
 		if (redraw) return "";
@@ -729,6 +730,16 @@ namespace Cpu {
 					}
 				}
 			}
+		}
+
+		//? Flash the refresh interval: reverse video on every other update, so it changes once per update_ms
+		static bool update_inverted = false;
+		if (not data_same) update_inverted = not update_inverted;
+		{
+			const string update = to_string(Config::getI("update_ms")) + "ms";
+			//? Same column the title button draws it at: the box edge, 8 cells for the frame, "- " and the text's own width
+			out += Mv::to(cpu_bottom ? y + height - 1 : y, x + width - update.size() - 5) + Fx::b + Theme::c("title")
+				+ (update_inverted ? Fx::rv : "") + update + Fx::urv + Fx::ub;
 		}
 
 		//? Draw battery if enabled and present

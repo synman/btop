@@ -75,6 +75,8 @@ namespace Fx {
 	const string ui = e + "23m";			//* Italic off
 	const string ul = e + "4m";				//* Underline on
 	const string uul = e + "24m";			//* Underline off
+	const string rv = e + "7m";				//* Reverse video (swap foreground and background) on
+	const string urv = e + "27m";			//* Reverse video off
 	const string bl = e + "5m";				//* Blink on
 	const string ubl = e + "25m";			//* Blink off
 	const string s = e + "9m";				//* Strike/crossed-out on
