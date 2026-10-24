@@ -142,7 +142,8 @@ namespace Gpu {
 				 pcie_txrx = true,
 				 encoder_utilization = true,
 				 decoder_utilization = true,
-				 npu = false;
+				 npu = false,
+				 mem_bandwidth = false;
 	};
 
 	//* Per-device container for GPU info
@@ -168,6 +169,7 @@ namespace Gpu {
 
 		long long pcie_tx = 0; // KB/s
 		long long pcie_rx = 0;
+		long long mem_bw_peak = 0; // KiB/s, the memory bus ceiling the MEM meter is measured against; 0 = unknown
 
 		long long encoder_utilization = 0;
 		long long decoder_utilization = 0;

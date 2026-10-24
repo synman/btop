@@ -403,6 +403,7 @@ namespace Shared {
 					   + gpus[i].supported_functions.pwr_usage
 					   + (gpus[i].supported_functions.encoder_utilization or gpus[i].supported_functions.decoder_utilization)
 					   + gpus[i].supported_functions.npu
+					   + gpus[i].supported_functions.mem_bandwidth
 					   + (gpus[i].supported_functions.mem_total or gpus[i].supported_functions.mem_used)
 						* (1 + 2*(gpus[i].supported_functions.mem_total and gpus[i].supported_functions.mem_used) + 2*gpus[i].supported_functions.mem_utilization);
 		}
@@ -2224,8 +2225,11 @@ namespace Gpu {
 					.pcie_txrx = true,
 					.encoder_utilization = false,
 					.decoder_utilization = false,
-					.npu = not npu_dir.empty()
+					.npu = not npu_dir.empty(),
+					.mem_bandwidth = true
 				};
+				//? The bus the iGPU shares with the CPU: this box runs two DDR5 channels at 4400 MT/s, 2 x 8 B x 4400 MT/s = 70.4 GB/s
+				gpus_slice->mem_bw_peak = 68'750'000;
 				//? An integrated GPU has no PCIe link: TX/RX carry its memory traffic, TX = bytes the GPU writes, RX = bytes it reads
 
 				//? Intel's video engine does both encode and decode, so ENC and DEC show the same video-engine load
