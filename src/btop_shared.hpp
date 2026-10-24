@@ -141,7 +141,8 @@ namespace Gpu {
 				 mem_used = true,
 				 pcie_txrx = true,
 				 encoder_utilization = true,
-				 decoder_utilization = true;
+				 decoder_utilization = true,
+				 npu = false;
 	};
 
 	//* Per-device container for GPU info
@@ -170,6 +171,12 @@ namespace Gpu {
 
 		long long encoder_utilization = 0;
 		long long decoder_utilization = 0;
+
+		//? NPU beside an Intel iGPU; npu_online drops while the driver is reloaded and the counter files are gone
+		bool npu_online = false;
+		long long npu_utilization = 0; // %
+		long long npu_mem_used = 0; // bytes
+		unsigned int npu_clock_speed = 0, npu_clock_max = 0; // MHz
 
 		gpu_info_supported supported_functions;
 

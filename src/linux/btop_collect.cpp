@@ -294,6 +294,7 @@ namespace Gpu {
 		const char* device = "i915";
 		struct engines *engines = nullptr;
 		fs::path rapl_gpu_energy;
+		fs::path npu_dir; //? sysfs dir of the NPU's counter files, empty when the machine has none
 
 		bool initialized = false;
 		bool init();
@@ -401,6 +402,7 @@ namespace Shared {
 				gpu_b_height_offsets[i] = gpus[i].supported_functions.gpu_utilization
 					   + gpus[i].supported_functions.pwr_usage
 					   + (gpus[i].supported_functions.encoder_utilization or gpus[i].supported_functions.decoder_utilization)
+					   + gpus[i].supported_functions.npu
 					   + (gpus[i].supported_functions.mem_total or gpus[i].supported_functions.mem_used)
 						* (1 + 2*(gpus[i].supported_functions.mem_total and gpus[i].supported_functions.mem_used) + 2*gpus[i].supported_functions.mem_utilization);
 		}
@@ -2079,6 +2081,48 @@ namespace Gpu {
 			}
 		}
 
+		//? NPU counters from the intel_vpu driver, readable by normal users. npu_busy_time_us is cumulative,
+		//? so utilization is its delta over wall time. A driver reload removes the files for about 3 s: that reads as offline.
+		namespace Npu {
+			long long read_counter(const fs::path& file) {
+				long long value = -1;
+				std::ifstream stream(file);
+				return (stream >> value) ? value : -1;
+			}
+
+			fs::path find_dir() {
+				std::error_code ec;
+				for (const auto& dir : fs::directory_iterator("/sys/bus/pci/devices", ec))
+					if (fs::exists(dir.path() / "npu_busy_time_us", ec)) return dir.path();
+				return {};
+			}
+
+			void sample(gpu_info* gpu) {
+				static long long prev_busy_us = -1, prev_us = 0;
+				const long long busy_us = read_counter(npu_dir / "npu_busy_time_us");
+				const long long clock = read_counter(npu_dir / "npu_current_frequency_mhz");
+				const long long us = get_monotonicTimeUSec();
+
+				gpu->npu_online = busy_us >= 0 and clock >= 0;
+				if (not gpu->npu_online) {
+					prev_busy_us = -1;
+					gpu->npu_utilization = gpu->npu_mem_used = 0;
+					gpu->npu_clock_speed = 0;
+					return;
+				}
+
+				//? a counter that went backwards was reset by a reload: keep the last value for one sample
+				if (prev_busy_us >= 0 and busy_us >= prev_busy_us and us > prev_us)
+					gpu->npu_utilization = clamp((long long)round((double)(busy_us - prev_busy_us) * 100.0 / (double)(us - prev_us)), 0ll, 100ll);
+				prev_busy_us = busy_us;
+				prev_us = us;
+
+				gpu->npu_clock_speed = (unsigned int)clock;
+				gpu->npu_clock_max = (unsigned int)max(0ll, read_counter(npu_dir / "npu_max_frequency_mhz"));
+				gpu->npu_mem_used = max(0ll, read_counter(npu_dir / "npu_memory_utilization"));
+			}
+		}
+
 		bool init() {
 			if (initialized) return false;
 
@@ -2132,6 +2176,8 @@ namespace Gpu {
 					Logger::debug("Intel GPU: no energy-gpu event and no readable RAPL uncore domain, power not shown");
 			}
 
+			npu_dir = Npu::find_dir();
+
 			device_count = 1;
 
 			gpus.resize(gpus.size() + device_count);
@@ -2177,7 +2223,8 @@ namespace Gpu {
 					.mem_used = true,
 					.pcie_txrx = true,
 					.encoder_utilization = false,
-					.decoder_utilization = false
+					.decoder_utilization = false,
+					.npu = not npu_dir.empty()
 				};
 				//? An integrated GPU has no PCIe link: TX/RX carry its memory traffic, TX = bytes the GPU writes, RX = bytes it reads
 
@@ -2251,6 +2298,9 @@ namespace Gpu {
 			} else {
 				gpus_slice->pcie_tx = gpus_slice->pcie_rx = -1; //? hides the row until a stream opens
 			}
+
+			if (gpus_slice->supported_functions.npu)
+				Npu::sample(gpus_slice);
 
 			return true;
 		}

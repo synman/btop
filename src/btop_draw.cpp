@@ -1015,6 +1015,7 @@ namespace Gpu {
 	vector<Draw::Meter> gpu_meter_vec = {};
 	vector<Draw::Meter> pwr_meter_vec = {};
 	vector<Draw::Meter> enc_meter_vec = {};
+	vector<Draw::Meter> npu_meter_vec = {};
 	vector<string> box = {};
 
     string draw(const gpu_info& gpu, unsigned long index, bool force_redraw, bool data_same) {
@@ -1033,6 +1034,7 @@ namespace Gpu {
 		auto& gpu_meter = gpu_meter_vec[index];
 		auto& pwr_meter = pwr_meter_vec[index];
 		auto& enc_meter = enc_meter_vec[index];
+		auto& npu_meter = npu_meter_vec[index];
 
 		if (force_redraw) redraw[index] = true;
         bool show_temps = gpu.supported_functions.temp_info and (Config::getB("check_temp"));
@@ -1075,6 +1077,8 @@ namespace Gpu {
 				mem_used_graph = Draw::Graph{b_width/2 - 2, 2 + 2*(gpu.supported_functions.mem_utilization), "used", safeVal(gpu.gpu_percent, "gpu-vram-totals"s), graph_symbol};
 			if (gpu.supported_functions.encoder_utilization)
 				enc_meter = Draw::Meter{b_width/2 - 10, "cpu"};
+			if (gpu.supported_functions.npu)
+				npu_meter = Draw::Meter{max(1, b_width - 25), "cpu"}; //? 25 = "NPU " + 4-wide percent + '%' + space + 13-wide clock text
 		}
 
 
@@ -1127,6 +1131,17 @@ namespace Gpu {
 			rows_used++;
 		}
 
+		//? NPU meter with its clock against the maximum; "offline" while the driver is reloading
+		if (gpu.supported_functions.npu) {
+			string npu_clock_string = not gpu.npu_online ? "offline"
+				: gpu.npu_clock_max > 0 ? fmt::format("{}/{} MHz", gpu.npu_clock_speed, gpu.npu_clock_max)
+				: fmt::format("{} MHz", gpu.npu_clock_speed);
+			out += Mv::to(b_y + rows_used, b_x + 1) + Theme::c("main_fg") + Fx::b + "NPU " + npu_meter(gpu.npu_utilization)
+				+ Theme::g("cpu").at(clamp(gpu.npu_utilization, 0ll, 100ll)) + rjust(to_string(gpu.npu_utilization), 4) + Theme::c("main_fg") + '%'
+				+ ' ' + rjust(npu_clock_string, 13) + Fx::ub;
+			rows_used++;
+		}
+
 		if (gpu.supported_functions.mem_total or gpu.supported_functions.mem_used) {
 			out += Mv::to(b_y + rows_used, b_x);
 			if (gpu.supported_functions.mem_total and gpu.supported_functions.mem_used) {
@@ -1149,6 +1164,11 @@ namespace Gpu {
 					out += Mv::l(b_width/2+6) + Mv::d(1) + Theme::c("div_line") + Symbols::div_left+Symbols::h_line + Theme::c("title") + "Utilization:" + Theme::c("div_line") + Symbols::h_line*(b_width/2-14) + Symbols::div_right
 						+  Mv::l(b_width/2)   + Mv::d(1) + mem_util_graph(gpu.mem_utilization_percent, (data_same or redraw[index]))
 						+  Mv::l(b_width/2-1) + Mv::u(1) + rjust(to_string(gpu.mem_utilization_percent.back()), 3) + '%';
+
+				//? NPU memory in the empty slot under Total, where other GPUs draw Utilization
+				if (gpu.supported_functions.npu and not gpu.supported_functions.mem_utilization)
+					out += Mv::to(b_y + rows_used + 2, b_x + 2) + Theme::c("main_fg") + Fx::b + "NPU mem:"
+						+ rjust(gpu.npu_online ? floating_humanizer(gpu.npu_mem_used) : "offline", b_width/2-11) + Fx::ub;
 
 				//? Memory clock speed
 				if (gpu.supported_functions.mem_clock) {
@@ -2376,6 +2396,7 @@ namespace Draw {
 			gpu_meter_vec.resize(shown);
 			pwr_meter_vec.resize(shown);
 			enc_meter_vec.resize(shown);
+			npu_meter_vec.resize(shown);
 			redraw.resize(shown);
 			//? Side by side, every box takes the height of the tallest stats list so the row lines up
 			const int min_total_height = total_height;
