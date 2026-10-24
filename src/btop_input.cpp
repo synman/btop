@@ -488,16 +488,17 @@ namespace Input {
 					}
 					Config::set("update_following", true);
 				}
-				else if (is_in(key, "+", "-", "space", "C") and Config::getB("proc_tree")) {
+				//? With no process selected, "+" and "-" fall through to the refresh interval buttons of the cpu box
+				else if (is_in(key, "+", "-", "space", "C") and Config::getB("proc_tree")
+						and (Config::getI("proc_selected") > 0
+							or (Config::getB("follow_process") and Config::getI("followed_pid") == Config::getI("detailed_pid")))) {
 					const bool is_following_detailed = Config::getB("follow_process") and Config::getI("followed_pid") == Config::getI("detailed_pid");
-					if (Config::getI("proc_selected") > 0 or is_following_detailed) {
-						atomic_wait(Runner::active);
-						auto& pid = is_following_detailed and Config::getI("proc_selected") == 0 ? Config::getI("followed_pid") : Config::getI("selected_pid");
-						if (key == "+" or key == "space") Proc::expand = pid;
-						if (key == "-" or key == "space") Proc::collapse = pid;
-						if (key == "C")	Proc::toggle_children = pid;
-						no_update = false;
-					}
+					atomic_wait(Runner::active);
+					auto& pid = is_following_detailed and Config::getI("proc_selected") == 0 ? Config::getI("followed_pid") : Config::getI("selected_pid");
+					if (key == "+" or key == "space") Proc::expand = pid;
+					if (key == "-" or key == "space") Proc::collapse = pid;
+					if (key == "C")	Proc::toggle_children = pid;
+					no_update = false;
 				}
 				else if (is_in(key, "t", kill_key) and (Config::getB("show_detailed") or Config::getI("selected_pid") > 0)) {
 					atomic_wait(Runner::active);
