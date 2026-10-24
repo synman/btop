@@ -5,7 +5,7 @@ Arrow Lake integrated GPU show up properly, and it fixes the layout when two GPU
 Everything else is upstream. Other i915 GPUs take the same code paths, but only Arrow Lake was tested.
 For btop itself, read [README.md](README.md).
 
-The version string reads `1.4.7+arrowlake.8`. The `+arrowlake.N` part is semver build metadata.
+The version string reads `1.4.7+arrowlake.9`. The `+arrowlake.N` part is semver build metadata.
 It counts our builds and does not change upstream's version.
 
 ## What it changes
@@ -21,6 +21,7 @@ Intel GPU, in `src/linux/`:
 | ENC / DEC | Not shown | Load of the video engine, which does both jobs |
 | TX / RX row | Not shown, since an iGPU has no PCIe link | GPU memory write and read bandwidth from the i915 OA unit |
 | NPU row | Not shown | `NPU` meter with clock against maximum, from the `intel_vpu` sysfs counters. `NPU mem:` sits in the empty slot under `Total:`. Both read `offline` while the driver reloads |
+| MEM row | Not shown | `MEM` meter of the GPU's own memory traffic (TX writes plus RX reads) against 70.4 GB/s, the ceiling of the two DDR5-4400 channels on the Ultra. It reads `n/a` while no OA stream is open. It does not include CPU or NPU traffic |
 
 Layout, in `src/btop_draw.cpp`:
 
@@ -103,7 +104,7 @@ build ran on Debian 13 with `build-essential` (g++ 14) in a `debian:trixie-slim`
 
 ## Keeping it current
 
-The code change is two commits on top of the v1.4.7 tag: Arrow Lake support, then the NPU row.
+The code change is three commits on top of the v1.4.7 tag: Arrow Lake support, the NPU row, then the MEM row.
 This file and the README banner come in later commits that touch no code. To move to a newer
 upstream release, rebase the branch onto the new tag and rebuild. Check two things after a rebase:
 
