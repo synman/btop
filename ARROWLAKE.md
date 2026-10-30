@@ -5,7 +5,7 @@ Arrow Lake integrated GPU show up properly, and it fixes the layout when two GPU
 Everything else is upstream. Other i915 GPUs take the same code paths, but only Arrow Lake was tested.
 For btop itself, read [README.md](README.md).
 
-The version string reads `1.4.7+arrowlake.14`. The `+arrowlake.N` part is semver build metadata.
+The version string reads `1.4.7+arrowlake.15`. The `+arrowlake.N` part is semver build metadata.
 It counts our builds and does not change upstream's version.
 
 ## What it changes
@@ -37,7 +37,7 @@ gets its own GPU box after the i915 one. The vendored `src/linux/intel_gpu_top/`
 | Memory | VRAM used and total from the xe device query on the render node |
 | Power | Card energy counter `energy1_input` in hwmon, as a change over time; the scale is `power1_cap` |
 | Temperature | The `pkg` sensor in hwmon, scaled to its `crit` limit |
-| FAN, VRAM temperature | One `FAN` row: the fan speed in rpm, then the `VRAM` temperature graph and degrees in the same cells as the GPU row's temperature graph. A sensor with no reading leaves its field blank. `fan1_input` sometimes fails with `EAGAIN` or reads 0 between real values, so one such sample after a real value is held over; a second in a row is shown, so a stopped fan reads 0 one sample late. One blank row under the stats keeps the box as tall as the iGPU and RTX boxes |
+| FAN, VRAM temperature | One `FAN` row: the fan speed in rpm, then the `VRAM` temperature graph and degrees in the same cells as the GPU row's temperature graph. A sensor with no reading leaves its field blank. `fan1_input` fails with `EAGAIN` or reads 0 when read again too soon, by btop or another reader, so up to 3 such samples in a row after a real value are held over; the 4th is shown, so a stopped fan reads 0 three samples late. One blank row under the stats keeps the box as tall as the iGPU and RTX boxes |
 | TX / RX, MEM, NPU | Not shown, there is no source for them on xe |
 
 Layout, in `src/btop_draw.cpp`:
