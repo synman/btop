@@ -5,7 +5,7 @@ Arrow Lake integrated GPU show up properly, and it fixes the layout when two GPU
 Everything else is upstream. Other i915 GPUs take the same code paths, but only Arrow Lake was tested.
 For btop itself, read [README.md](README.md).
 
-The version string reads `1.4.7+arrowlake.11`. The `+arrowlake.N` part is semver build metadata.
+The version string reads `1.4.7+arrowlake.12`. The `+arrowlake.N` part is semver build metadata.
 It counts our builds and does not change upstream's version.
 
 ## What it changes
@@ -24,6 +24,23 @@ Intel GPU, in `src/linux/`:
 | MEM row | Not shown | `MEM` meter of the GPU's own memory traffic (TX writes plus RX reads) against 70.4 GB/s, the ceiling of the two DDR5-4400 channels on the Ultra. It reads `n/a` while no OA stream is open. It does not include CPU or NPU traffic |
 | Refresh interval | `- 2000ms +` is static | The `2000ms` text swaps foreground and background on every update, so it flashes once per interval and shows the display is still updating |
 | `+` / `-` keys | With the process tree on, they always expand or collapse a tree node, so the refresh interval keys did nothing | They expand or collapse only while a process is selected. With none selected they change the refresh interval, as the `- 2000ms +` buttons do |
+
+Intel xe GPUs (discrete Arc, Battlemage), in `src/linux/btop_collect.cpp`. Each Intel card is found by PCI slot and
+gets its own GPU box after the i915 one. The vendored `src/linux/intel_gpu_top/` files are untouched, because they only know i915.
+
+| Panel item | This branch, for an xe device |
+|---|---|
+| GPU name | `Intel Arc Pro B70` for id `8086:e223`, else the igt name table, else `Intel Battlemage (Gen20)` or `Intel GPU (xe)` |
+| GPU % | The busiest engine of any class, compute (ccs) included, from the xe PMU `engine-active-ticks` over `engine-total-ticks` |
+| ENC / DEC | The busiest video decode engine (class 2); the video engines do both jobs, as on the iGPU |
+| Clock | `tile0/gt0/freq0/act_freq` in sysfs |
+| Memory | VRAM used and total from the xe device query on the render node |
+| Power | Card energy counter `energy1_input` in hwmon, as a change over time; the scale is `power1_cap` |
+| Temperature | The `pkg` sensor in hwmon, scaled to its `crit` limit |
+| TX / RX, MEM, NPU | Not shown, there is no source for them on xe |
+
+The collector also reads the VRAM temperature and the fan speed. They are kept in `gpu_info` and logged at debug level,
+and no box draws them yet.
 
 Layout, in `src/btop_draw.cpp`:
 
@@ -89,6 +106,11 @@ build ran on Debian 13 with `build-essential` (g++ 14) in a `debian:trixie-slim`
 
     `make setcap` does not add it, because it lets btop attach to any process. Grant it only where
     you trust the btop binary and its users, such as a single-user kiosk.
+- **Intel xe.** The xe PMU needs `cap_perfmon` and `kernel.perf_event_paranoid` of 2 or lower, the same as i915.
+  The VRAM figures need an openable render node (group `render`) or card node (group `video`). hwmon and sysfs
+  need nothing. An open PMU event and the hwmon reads keep a runtime-suspended card awake while btop runs. A card
+  that stops answering reads shows as offline and is probed again every 5 s; a card that was absent when btop
+  started is not picked up later.
 - **NPU.** The NPU row and `NPU mem:` need the `intel_vpu` driver, which exposes
   `npu_busy_time_us`, `npu_current_frequency_mhz`, `npu_max_frequency_mhz` and
   `npu_memory_utilization` under `/sys/bus/pci/devices/<address>/`. Normal users can read them,
