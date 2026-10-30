@@ -1010,6 +1010,7 @@ namespace Cpu {
 namespace Gpu {
 	int width_p = 100, height_p = 32;
 	int min_width = 41, min_height = 8;
+	int min_graph_width = 8; //? narrowest graph (cells) a box in a shared row may have
 	int width = 41, total_height;
 	bool side_by_side = false; //? GPU boxes in one row, each a 1/shown-wide column, instead of stacked
 	vector<int> x_vec = {}, y_vec = {}, b_height_vec = {};
@@ -1021,7 +1022,7 @@ namespace Gpu {
 	vector<int> shown_panels = {};
 	int graph_up_height;
 	vector<Draw::Graph> graph_upper_vec = {}, graph_lower_vec = {};
-	vector<Draw::Graph> temp_graph_vec = {};
+	vector<Draw::Graph> temp_graph_vec = {}, temp_mem_graph_vec = {};
 	vector<Draw::Graph> mem_used_graph_vec = {}, mem_util_graph_vec = {};
 	vector<Draw::Meter> gpu_meter_vec = {};
 	vector<Draw::Meter> pwr_meter_vec = {};
@@ -1029,6 +1030,33 @@ namespace Gpu {
 	vector<Draw::Meter> npu_meter_vec = {};
 	vector<Draw::Meter> membw_meter_vec = {};
 	vector<string> box = {};
+
+	bool side_by_side_fits(int term_width, int n) {
+		return n > 1 and term_width / n >= min_width + 2 + min_graph_width;
+	}
+
+	//? A GPU name that fits the title bubble beside the clock bubble: whole when it fits, else cut at the last word boundary
+	//? within the budget; only a single word longer than the budget is cut mid-word
+	static string fit_name(const string& name, size_t budget) {
+		if (Tools::ulen(name) <= budget) return name;
+		size_t end = name.size(), chars = 0;
+		for (size_t i = 0; i < name.size(); i++) {
+			if ((static_cast<unsigned char>(name[i]) & 0xC0) == 0x80) continue;
+			if (chars == budget + 1) { end = i; break; }
+			chars++;
+		}
+		//? name[0, end) holds budget+1 characters: the cut may fall on a space at its last position
+		const size_t space = name.rfind(' ', end - 1);
+		if (space != string::npos and space > 0) return string(rtrim(name.substr(0, space)));
+		size_t cut = name.size();
+		chars = 0;
+		for (size_t i = 0; i < name.size(); i++) {
+			if ((static_cast<unsigned char>(name[i]) & 0xC0) == 0x80) continue;
+			if (chars == budget) { cut = i; break; }
+			chars++;
+		}
+		return name.substr(0, cut);
+	}
 
     string draw(const gpu_info& gpu, unsigned long index, bool force_redraw, bool data_same) {
 		if (Runner::stopping) return "";
@@ -1041,6 +1069,7 @@ namespace Gpu {
 		auto& graph_upper = graph_upper_vec[index];
 		auto& graph_lower = graph_lower_vec[index];
 		auto& temp_graph = temp_graph_vec[index];
+		auto& temp_mem_graph = temp_mem_graph_vec[index];
 		auto& mem_used_graph = mem_used_graph_vec[index];
 		auto& mem_util_graph = mem_util_graph_vec[index];
 		auto& gpu_meter = gpu_meter_vec[index];
@@ -1082,6 +1111,8 @@ namespace Gpu {
 			}
 			if (gpu.supported_functions.temp_info)
 				temp_graph = Draw::Graph{6, 1, "temp", gpu.temp, graph_symbol, false, false, gpu.temp_max, -23};
+			if (gpu.supported_functions.mem_temp)
+				temp_mem_graph = Draw::Graph{6, 1, "temp", gpu.temp_mem, graph_symbol, false, false, gpu.temp_max, -23}; //? same scale as the package temperature: the xe collector reads no VRAM limit
 			if (gpu.supported_functions.pwr_usage)
 				pwr_meter = Draw::Meter{b_width - (gpu.supported_functions.pwr_state and gpu.pwr_state != 32 ? 25 : 12), "cached"};
 			if (gpu.supported_functions.mem_utilization)
@@ -1146,6 +1177,20 @@ namespace Gpu {
 			rows_used++;
 		}
 
+		//? FAN and VRAM temperature (xe): the fan speed, then the memory temperature graph in the same cells as the GPU row's temperature graph.
+		//? A sensor that gives no reading leaves its field blank; hwmon has no fan maximum, so the fan gets no meter
+		if (gpu.supported_functions.fan or gpu.supported_functions.mem_temp) {
+			const bool fan_known = gpu.supported_functions.fan and gpu.fan_rpm >= 0;
+			out += Mv::to(b_y + rows_used, b_x + 1) + Theme::c("main_fg") + Fx::b + "FAN " + rjust(fan_known ? to_string(gpu.fan_rpm) + " rpm" : "", 9) + string(9, ' ') + Fx::ub;
+			if (gpu.supported_functions.mem_temp and Config::getB("check_temp")) {
+				const auto [mem_temp, mem_unit] = celsius_to(gpu.temp_mem.back(), temp_scale);
+				out += Theme::c("main_fg") + Fx::b + "VRAM " + Fx::ub + Theme::c("inactive_fg") + graph_bg * 6 + Mv::l(6)
+					+ Theme::g("temp").at(clamp(gpu.temp_mem.back() * 100 / gpu.temp_max, 0ll, 100ll)) + temp_mem_graph(gpu.temp_mem, data_same or redraw[index])
+					+ rjust(to_string(mem_temp), 4) + Theme::c("main_fg") + mem_unit;
+			}
+			rows_used++;
+		}
+
 		//? NPU meter with its clock against the maximum; "offline" while the driver is reloading
 		if (gpu.supported_functions.npu) {
 			string npu_clock_string = not gpu.npu_online ? "offline"
@@ -1177,7 +1222,8 @@ namespace Gpu {
 				string used_memory_string = floating_humanizer(gpu.mem_used);
 
 				auto offset = (gpu.supported_functions.mem_total or gpu.supported_functions.mem_used)
-					* (1 + 2*(gpu.supported_functions.mem_total and gpu.supported_functions.mem_used) + 2*gpu.supported_functions.mem_utilization);
+					* (1 + 2*(gpu.supported_functions.mem_total and gpu.supported_functions.mem_used) + 2*gpu.supported_functions.mem_utilization)
+					+ gpu.pad_rows; //? the divider runs on through the blank rows to the bottom border
 
 				//? Used graph, memory section header, total vram
 				out += Theme::c("div_line") + Symbols::div_left + Symbols::h_line + Symbols::title_left + Fx::b + Theme::c("title") + "vram" + Theme::c("div_line") + Fx::ub + Symbols::title_right
@@ -2316,7 +2362,7 @@ namespace Draw {
 		Gpu::total_height = 0;
 		//? Side by side when every box still gets twice the minimum width: the GPU boxes then cost one row of
 		//? height instead of one per GPU, and the rows go to the boxes below them, the CPU box first
-		Gpu::side_by_side = Gpu::shown > 1 and Term::width / Gpu::shown >= 2 * Gpu::min_width;
+		Gpu::side_by_side = Gpu::side_by_side_fits(Term::width, Gpu::shown);
 		for (int i = 0; i < Gpu::shown; i++) {
 			using namespace Gpu;
 			if (side_by_side) total_height = max(total_height, 4 + gpu_b_height_offsets[shown_panels[i]]);
@@ -2425,6 +2471,7 @@ namespace Draw {
 			gpu_meter_vec.resize(shown);
 			pwr_meter_vec.resize(shown);
 			enc_meter_vec.resize(shown);
+			temp_mem_graph_vec.resize(shown);
 			npu_meter_vec.resize(shown);
 			membw_meter_vec.resize(shown);
 			redraw.resize(shown);
@@ -2461,7 +2508,7 @@ namespace Draw {
 				string name = Config::getS(std::string("custom_gpu_name") + (char)(shown_panels[i]+'0'));
 				if (name.empty()) name = gpu_names[shown_panels[i]];
 
-				box[i] += createBox(b_x_vec[i], b_y_vec[i], b_width, b_height_vec[i], "", false, name.substr(0, b_width-5));
+				box[i] += createBox(b_x_vec[i], b_y_vec[i], b_width, b_height_vec[i], "", false, fit_name(name, b_width - 14));
 				b_height_vec[i] = height - 2;
 			}
 		}

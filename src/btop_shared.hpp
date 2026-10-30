@@ -108,7 +108,9 @@ namespace Shared {
 
 namespace Gpu {
 	extern vector<string> box;
-	extern int width, total_height, min_width, min_height;
+	extern int width, total_height, min_width, min_graph_width, min_height;
+	//? True when `n` boxes share one row at this terminal width: each keeps its full-width stats box, its two borders and a graph of min_graph_width cells
+	bool side_by_side_fits(int term_width, int n);
 	extern vector<int> x_vec, y_vec;
 	extern vector<bool> redraw;
 	extern int shown;
@@ -143,7 +145,9 @@ namespace Gpu {
 				 encoder_utilization = true,
 				 decoder_utilization = true,
 				 npu = false,
-				 mem_bandwidth = false;
+				 mem_bandwidth = false,
+				 fan = false,      //? fan speed in rpm (xe); with mem_temp it makes one FAN row
+				 mem_temp = false; //? memory (VRAM) temperature (xe)
 	};
 
 	//* Per-device container for GPU info
@@ -174,9 +178,10 @@ namespace Gpu {
 		long long encoder_utilization = 0;
 		long long decoder_utilization = 0;
 
-		//? Read by the Intel xe collector, not drawn yet: fan speed (rpm) and memory temperature (C); -1 = none
+		//? Read by the Intel xe collector and drawn in its FAN row: fan speed (rpm, -1 = no reading) and memory temperature (C)
 		long long fan_rpm = -1;
-		long long temp_mem = -1;
+		deque<long long> temp_mem = {0};
+		int pad_rows = 0; //? blank rows at the bottom of the stats box, so a box with fewer readouts is as tall as its row mates
 
 		//? NPU beside an Intel iGPU; npu_online drops while the driver is reloaded and the counter files are gone
 		bool npu_online = false;

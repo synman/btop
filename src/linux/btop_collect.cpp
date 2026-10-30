@@ -407,6 +407,8 @@ namespace Shared {
 					   + (gpus[i].supported_functions.encoder_utilization or gpus[i].supported_functions.decoder_utilization)
 					   + gpus[i].supported_functions.npu
 					   + gpus[i].supported_functions.mem_bandwidth
+					   + (gpus[i].supported_functions.fan or gpus[i].supported_functions.mem_temp)
+					   + gpus[i].pad_rows
 					   + (gpus[i].supported_functions.mem_total or gpus[i].supported_functions.mem_used)
 						* (1 + 2*(gpus[i].supported_functions.mem_total and gpus[i].supported_functions.mem_used) + 2*gpus[i].supported_functions.mem_utilization);
 		}
@@ -2305,9 +2307,13 @@ namespace Gpu {
 						.mem_total = dev.vram, .mem_used = dev.vram,
 						.pcie_txrx = false,
 						.encoder_utilization = dev.has_video, .decoder_utilization = dev.has_video,
-						.npu = false, .mem_bandwidth = false
+						.npu = false, .mem_bandwidth = false,
+						.fan = not dev.hwmon.empty() and read_ll(dev.hwmon / "fan1_input") >= 0,
+						.mem_temp = hwmon_temp(dev, "vram") >= 0
 					};
 					gpu->pwr_max_usage = 10'000;
+					//? With the FAN row this box has 7 stats rows; the iGPU and the RTX have 8, so one blank row keeps the three titles on one screen row
+					gpu->pad_rows = (gpu->supported_functions.fan or gpu->supported_functions.mem_temp) ? 1 : 0;
 					if (not dev.hwmon.empty()) {
 						const long long cap_uw = read_ll(dev.hwmon / "power1_cap");
 						if (cap_uw > 0) gpu->pwr_max_usage = cap_uw / 1000; //? PL2, microwatts to milliwatts
@@ -2374,18 +2380,19 @@ namespace Gpu {
 					dev.prev_uj = uj;
 					dev.prev_us = us;
 					gpu->temp.push_back(max(0ll, hwmon_temp(dev, "pkg")));
-					gpu->temp_mem = hwmon_temp(dev, "vram");
+					gpu->temp_mem.push_back(max(0ll, hwmon_temp(dev, "vram")));
 					gpu->fan_rpm = read_ll(dev.hwmon / "fan1_input");
 				} else {
 					gpu->temp.push_back(0);
-					gpu->temp_mem = gpu->fan_rpm = -1;
+					gpu->temp_mem.push_back(0);
+					gpu->fan_rpm = -1;
 				}
 				gpu->pwr_usage = (long long)round(pwr * 1000);
 				if (gpu->pwr_usage > gpu->pwr_max_usage) gpu->pwr_max_usage = gpu->pwr_usage;
 				gpu->gpu_percent.at("gpu-pwr-totals").push_back(clamp((long long)round((double)gpu->pwr_usage * 100.0 / (double)gpu->pwr_max_usage), 0ll, 100ll));
 				Logger::debug("Intel xe {} ({}): online={} busy={}% video={}% clock={}MHz vram={}/{}B power={}mW (max {}) temp={}C (max {}) vram_temp={}C fan={}rpm engines={} first_engine_ticks={}/{}",
 					dev.slot, dev.name, dev.online, busy, video, gpu->gpu_clock_speed, gpu->mem_used, gpu->mem_total, gpu->pwr_usage, gpu->pwr_max_usage,
-					gpu->temp.back(), gpu->temp_max, gpu->temp_mem, gpu->fan_rpm, dev.engines.size(), first_ticks.first, first_ticks.second);
+					gpu->temp.back(), gpu->temp_max, gpu->temp_mem.back(), gpu->fan_rpm, dev.engines.size(), first_ticks.first, first_ticks.second);
 			}
 		}
 
@@ -2659,6 +2666,7 @@ namespace Gpu {
 				while (cmp_greater(gpu.gpu_percent.at("gpu-pwr-totals").size(), width)) gpu.gpu_percent.at("gpu-pwr-totals").pop_front();
 				//? Temperature
 				while (cmp_greater(gpu.temp.size(), 18)) gpu.temp.pop_front();
+				while (cmp_greater(gpu.temp_mem.size(), 18)) gpu.temp_mem.pop_front();
 				//? Memory usage
 				while (cmp_greater(gpu.gpu_percent.at("gpu-vram-totals").size(), width/2)) gpu.gpu_percent.at("gpu-vram-totals").pop_front();
 			}

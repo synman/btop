@@ -140,8 +140,14 @@ namespace Term {
 		if (proc) height += Proc::min_height;
 		else height += (mem ? Mem::min_height : 0) + (net ? Net::min_height : 0);
 	#ifdef GPU_SUPPORT
-		for (int i = 0; i < gpu; i++)
-			height += Gpu::gpu_b_height_offsets[i] + 4;
+		//? Boxes that share one row cost the tallest box once, the same rule calcSizes applies
+		const bool gpu_row = Gpu::side_by_side_fits(Term::width, gpu);
+		int gpu_tallest = 0;
+		for (int i = 0; i < gpu; i++) {
+			if (gpu_row) gpu_tallest = max(gpu_tallest, Gpu::gpu_b_height_offsets[i] + 4);
+			else height += Gpu::gpu_b_height_offsets[i] + 4;
+		}
+		height += gpu_tallest;
 	#endif
 
 		return { width, height };
