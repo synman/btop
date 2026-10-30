@@ -75,6 +75,8 @@ extern "C" {
 }
 	#include <fcntl.h>
 	#include <sys/ioctl.h>
+	#include <sys/syscall.h>
+	#include <linux/perf_event.h>
 	#undef class
 
 	#if defined(__clang__)
@@ -295,6 +297,7 @@ namespace Gpu {
 		struct engines *engines = nullptr;
 		fs::path rapl_gpu_energy;
 		fs::path npu_dir; //? sysfs dir of the NPU's counter files, empty when the machine has none
+		bool i915_present = false; //? an i915 device (the Arrow Lake iGPU) is monitored; xe devices follow it in the slice
 
 		bool initialized = false;
 		bool init();
@@ -2124,37 +2127,310 @@ namespace Gpu {
 			}
 		}
 
-		bool init() {
-			if (initialized) return false;
+		//? Intel xe devices (Battlemage and later discrete GPUs). Each one is keyed on its PCI slot, never on cardN/renderDN, which
+		//? renumber across boots and hotplug. Data: the xe PMU (engine busy), the xe device query (VRAM), hwmon (power, temps, fan)
+		//? and the GT frequency files in sysfs. Nothing here touches the vendored igt code, which only knows i915.
+		namespace Xe {
+			//? The two uapi structs the VRAM query needs, copied from include/uapi/drm/xe_drm.h (sizes checked against it at build time of the fork)
+			struct device_query { uint64_t extensions; uint32_t query; uint32_t size; uint64_t data; uint64_t reserved[2]; };
+			struct mem_region { uint16_t mem_class; uint16_t instance; uint32_t min_page_size; uint64_t total_size, used, cpu_visible_size, cpu_visible_used; uint64_t reserved[6]; };
+			constexpr uint32_t query_mem_regions = 1; //? DRM_XE_DEVICE_QUERY_MEM_REGIONS
+			constexpr uint16_t mem_class_vram = 1; //? DRM_XE_MEM_REGION_CLASS_VRAM
+			constexpr unsigned long ioctl_device_query = _IOWR('d', 0x40, device_query); //? DRM_IOCTL_XE_DEVICE_QUERY
+			constexpr unsigned int engine_class_video = 2; //? DRM_XE_ENGINE_CLASS_VIDEO_DECODE
+			constexpr uint64_t event_engine_active = 0x02, event_engine_total = 0x03; //? xe_pmu.c event ids
 
-			char *gpu_path = find_intel_gpu_dir();
-			if (!gpu_path) {
-				Logger::debug("Failed to find Intel GPU sysfs path, Intel GPUs will not be detected");
+			struct Engine {
+				int active_fd = -1, total_fd = -1;
+				unsigned int gt = 0, class_ = 0, instance = 0;
+				uint64_t prev_active = 0, prev_total = 0;
+			};
+
+			struct Dev {
+				string slot, card, name;
+				fs::path pci, hwmon;
+				vector<Engine> engines;
+				int drm_fd = -1;
+				bool online = false, vram = false, has_video = false;
+				bool engines_primed = false;
+				long long prev_uj = -1, prev_us = 0;
+				uint64_t retry_at = 0; //? ms; an offline device is rescanned from here on
+			};
+			vector<Dev> devs;
+
+			static long long read_ll(const fs::path& file) {
+				long long value = -1;
+				std::ifstream stream(file);
+				return (stream >> value) ? value : -1;
+			}
+
+			static string read_str(const fs::path& file) {
+				string value;
+				std::ifstream stream(file);
+				std::getline(stream, value);
+				return value;
+			}
+
+			static int perf_open(uint32_t type, uint64_t config, int cpu) {
+				perf_event_attr attr{};
+				attr.type = type;
+				attr.size = sizeof(attr);
+				attr.config = config;
+				return (int)syscall(SYS_perf_event_open, &attr, -1, cpu, -1, PERF_FLAG_FD_CLOEXEC);
+			}
+
+			static void close_dev(Dev& dev) {
+				for (auto& e : dev.engines) {
+					if (e.active_fd >= 0) close(e.active_fd);
+					if (e.total_fd >= 0) close(e.total_fd);
+				}
+				dev.engines.clear();
+				if (dev.drm_fd >= 0) close(dev.drm_fd);
+				dev.drm_fd = -1;
+				dev.online = dev.vram = dev.has_video = dev.engines_primed = false;
+				dev.prev_uj = -1;
+			}
+
+			//? Every (gt, class, instance) engine the PMU accepts. An invalid combination is ENOENT, so each class is walked until
+			//? its first ENOENT. Compute (ccs) is class 4 and is included: a Vulkan or LLM load runs there and never on render.
+			static bool open_engines(Dev& dev) {
+				string pmu_slot = dev.slot;
+				std::ranges::replace(pmu_slot, ':', '_');
+				const string pmu = "/sys/bus/event_source/devices/xe_" + pmu_slot;
+				const long long type = read_ll(pmu + "/type");
+				if (type < 0) { Logger::debug("Intel xe {}: no PMU {}", dev.slot, pmu); return false; }
+				const long long cpu = std::max(0ll, read_ll(pmu + "/cpumask")); //? a single-CPU PMU: the mask names the CPU to open on
+				for (unsigned int gt = 0; gt < 4; gt++) {
+					for (unsigned int cls = 0; cls < 5; cls++) {
+						for (unsigned int inst = 0; inst < 16; inst++) {
+							const uint64_t id = (uint64_t)inst << 12 | (uint64_t)cls << 20 | (uint64_t)gt << 60;
+							const int active = perf_open((uint32_t)type, id | event_engine_active, (int)cpu);
+							if (active < 0) {
+								if (errno == ENOENT) break;
+								Logger::warning("Intel xe {}: PMU not opened ({}); it needs CAP_PERFMON and kernel.perf_event_paranoid <= 2", dev.slot, strerror(errno));
+								return false;
+							}
+							const int total = perf_open((uint32_t)type, id | event_engine_total, (int)cpu);
+							if (total < 0) { close(active); break; }
+							dev.engines.push_back({active, total, gt, cls, inst, 0, 0});
+							if (cls == engine_class_video) dev.has_video = true;
+						}
+					}
+				}
+				if (dev.engines.empty()) { Logger::warning("Intel xe {}: the PMU accepted no engine", dev.slot); return false; }
+				return true;
+			}
+
+			//? DRM_IOCTL_XE_DEVICE_QUERY, VRAM region: false when the node cannot be queried
+			static bool query_vram(Dev& dev, long long& total, long long& used) {
+				if (dev.drm_fd < 0) return false;
+				device_query q{};
+				q.query = query_mem_regions;
+				if (ioctl(dev.drm_fd, ioctl_device_query, &q) != 0 or q.size == 0) return false;
+				vector<uint8_t> buf(q.size);
+				q.data = (uintptr_t)buf.data();
+				if (ioctl(dev.drm_fd, ioctl_device_query, &q) != 0) return false;
+				uint32_t count = 0;
+				std::memcpy(&count, buf.data(), sizeof(count));
+				for (uint32_t i = 0; i < count; i++) {
+					const size_t off = 8 + i * sizeof(mem_region);
+					if (off + sizeof(mem_region) > buf.size()) break;
+					mem_region r;
+					std::memcpy(&r, buf.data() + off, sizeof(r));
+					if (r.mem_class == mem_class_vram) { total = (long long)r.total_size; used = (long long)r.used; return true; }
+				}
 				return false;
 			}
 
-			char *gpu_device_id = get_intel_device_id(gpu_path);
-			if (!gpu_device_id) {
-				Logger::debug("Failed to find Intel GPU device ID, Intel GPUs will not be detected");
-				return false;
+			//? (Re)open everything for one device. Safe to call again after the device came back.
+			static bool open_dev(Dev& dev) {
+				close_dev(dev);
+				dev.pci = "/sys/bus/pci/devices/" + dev.slot;
+				std::error_code ec;
+				if (not fs::exists(dev.pci, ec)) return false;
+				//? the DRM nodes are resolved by slot every time: their numbers move
+				for (const auto& node : fs::directory_iterator(dev.pci / "drm", ec)) {
+					const auto name = node.path().filename().string();
+					if (name.starts_with("renderD") and dev.drm_fd < 0) dev.drm_fd = open(("/dev/dri/" + name).c_str(), O_RDWR | O_CLOEXEC);
+				}
+				if (dev.drm_fd < 0) {
+					for (const auto& node : fs::directory_iterator(dev.pci / "drm", ec)) {
+						const auto name = node.path().filename().string();
+						if (name.starts_with("card") and name.find('-') == string::npos) dev.drm_fd = open(("/dev/dri/" + name).c_str(), O_RDWR | O_CLOEXEC);
+					}
+				}
+				long long total = 0, used = 0;
+				dev.vram = query_vram(dev, total, used);
+				if (not dev.vram) Logger::debug("Intel xe {}: VRAM query failed, memory not shown", dev.slot);
+
+				dev.hwmon.clear();
+				for (const auto& h : fs::directory_iterator(dev.pci / "hwmon", ec))
+					if (read_str(h.path() / "name") == "xe") dev.hwmon = h.path();
+
+				if (not open_engines(dev)) { close_dev(dev); return false; }
+				string inventory;
+				for (const auto& e : dev.engines) inventory += fmt::format(" gt{}:class{}.{}", e.gt, e.class_, e.instance);
+				Logger::debug("Intel xe {}: {} engines opened:{}, vram query {}, hwmon {}", dev.slot, dev.engines.size(), inventory, dev.vram ? "ok" : "failed", dev.hwmon.empty() ? "none" : dev.hwmon.string());
+				dev.online = true;
+				return true;
 			}
 
-			char *gpu_device_name = get_intel_device_name(gpu_device_id);
+			//? hwmon temperature input (C) by its label: "pkg", "vram", ...
+			static long long hwmon_temp(const Dev& dev, const string& label, long long* crit = nullptr) {
+				for (int i = 1; i <= 32 and not dev.hwmon.empty(); i++) {
+					if (read_str(dev.hwmon / fmt::format("temp{}_label", i)) != label) continue;
+					const long long mc = read_ll(dev.hwmon / fmt::format("temp{}_input", i));
+					if (crit) { const long long c = read_ll(dev.hwmon / fmt::format("temp{}_crit", i)); if (c > 0) *crit = c / 1000; }
+					return mc >= 0 ? (mc + 500) / 1000 : -1;
+				}
+				return -1;
+			}
+
+			static string device_name(const string& card_dir, const string& id) {
+				if (id == "0xe223") return "Intel Arc Pro B70";
+				if (char* n = get_intel_device_name(id.c_str())) { string s(n); free(n); return s; }
+				static const std::unordered_set<string> battlemage = {"0xe202","0xe209","0xe20b","0xe20c","0xe20d","0xe210","0xe211","0xe212","0xe216","0xe220","0xe221","0xe222"};
+				(void)card_dir;
+				return battlemage.contains(id) ? "Intel Battlemage (Gen20)" : "Intel GPU (xe)";
+			}
+
+			template <bool is_init> static void collect(Dev& dev, gpu_info* gpu) {
+				const uint64_t now_ms = Tools::time_ms();
+				if constexpr (is_init) {
+					gpu->supported_functions = {
+						.gpu_utilization = true, .mem_utilization = false, .gpu_clock = true, .mem_clock = false,
+						.pwr_usage = not dev.hwmon.empty() and read_ll(dev.hwmon / "energy1_input") >= 0,
+						.pwr_state = false,
+						.temp_info = hwmon_temp(dev, "pkg") >= 0,
+						.mem_total = dev.vram, .mem_used = dev.vram,
+						.pcie_txrx = false,
+						.encoder_utilization = dev.has_video, .decoder_utilization = dev.has_video,
+						.npu = false, .mem_bandwidth = false
+					};
+					gpu->pwr_max_usage = 10'000;
+					if (not dev.hwmon.empty()) {
+						const long long cap_uw = read_ll(dev.hwmon / "power1_cap");
+						if (cap_uw > 0) gpu->pwr_max_usage = cap_uw / 1000; //? PL2, microwatts to milliwatts
+					}
+					long long crit = -1;
+					if (hwmon_temp(dev, "pkg", &crit) >= 0 and crit > 0) gpu->temp_max = crit;
+				}
+
+				if (not dev.online and now_ms >= dev.retry_at) {
+					if (open_dev(dev)) Logger::info("Intel xe {}: back online", dev.slot);
+					else dev.retry_at = now_ms + 5000;
+				}
+
+				long long busy = 0, video = 0;
+				std::pair<uint64_t, uint64_t> first_ticks{0, 0}; //? active and total tick deltas of the first engine, for the debug line
+				bool read_ok = dev.online;
+				if (dev.online) {
+					for (auto& e : dev.engines) {
+						uint64_t active = 0, total = 0;
+						if (read(e.active_fd, &active, sizeof(active)) != (ssize_t)sizeof(active) or read(e.total_fd, &total, sizeof(total)) != (ssize_t)sizeof(total)) {
+							read_ok = false;
+							break;
+						}
+						if (&e == &dev.engines.front()) first_ticks = {active - e.prev_active, total - e.prev_total};
+						if (dev.engines_primed and total > e.prev_total) {
+							const long long util = clamp((long long)round((double)(active - e.prev_active) * 100.0 / (double)(total - e.prev_total)), 0ll, 100ll);
+							busy = max(busy, util);
+							if (e.class_ == engine_class_video) video = max(video, util);
+						}
+						e.prev_active = active;
+						e.prev_total = total;
+					}
+					if (read_ok) dev.engines_primed = true;
+				}
+				if (dev.online and not read_ok) {
+					Logger::warning("Intel xe {}: reads failed, device offline", dev.slot);
+					close_dev(dev);
+					dev.retry_at = now_ms + 5000;
+				}
+
+				gpu->gpu_percent.at("gpu-totals").push_back(dev.online ? busy : 0);
+				gpu->encoder_utilization = gpu->decoder_utilization = dev.online ? video : 0;
+
+				if (dev.online) {
+					long long mem_total = 0, mem_used = 0;
+					if (dev.vram and query_vram(dev, mem_total, mem_used)) { gpu->mem_total = mem_total; gpu->mem_used = mem_used; }
+					long long clk = read_ll(dev.pci / "tile0/gt0/freq0/act_freq");
+					if (clk < 0) clk = read_ll(dev.pci / "tile0/gt0/freq0/cur_freq");
+					gpu->gpu_clock_speed = (unsigned int)max(0ll, clk);
+				} else {
+					gpu->gpu_clock_speed = 0;
+					gpu->mem_used = 0;
+				}
+				if (gpu->supported_functions.mem_total and gpu->mem_total > 0)
+					gpu->gpu_percent.at("gpu-vram-totals").push_back(clamp((long long)round((double)gpu->mem_used * 100.0 / (double)gpu->mem_total), 0ll, 100ll));
+
+				//? power: the card energy counter (microjoules, cumulative) over wall time; a wrap or a reset skips one sample
+				double pwr = 0;
+				if (dev.online and not dev.hwmon.empty()) {
+					const long long uj = read_ll(dev.hwmon / "energy1_input");
+					const long long us = get_monotonicTimeUSec();
+					if (uj >= 0 and dev.prev_uj >= 0 and uj >= dev.prev_uj and us > dev.prev_us)
+						pwr = (double)(uj - dev.prev_uj) / (double)(us - dev.prev_us);
+					dev.prev_uj = uj;
+					dev.prev_us = us;
+					gpu->temp.push_back(max(0ll, hwmon_temp(dev, "pkg")));
+					gpu->temp_mem = hwmon_temp(dev, "vram");
+					gpu->fan_rpm = read_ll(dev.hwmon / "fan1_input");
+				} else {
+					gpu->temp.push_back(0);
+					gpu->temp_mem = gpu->fan_rpm = -1;
+				}
+				gpu->pwr_usage = (long long)round(pwr * 1000);
+				if (gpu->pwr_usage > gpu->pwr_max_usage) gpu->pwr_max_usage = gpu->pwr_usage;
+				gpu->gpu_percent.at("gpu-pwr-totals").push_back(clamp((long long)round((double)gpu->pwr_usage * 100.0 / (double)gpu->pwr_max_usage), 0ll, 100ll));
+				Logger::debug("Intel xe {} ({}): online={} busy={}% video={}% clock={}MHz vram={}/{}B power={}mW (max {}) temp={}C (max {}) vram_temp={}C fan={}rpm engines={} first_engine_ticks={}/{}",
+					dev.slot, dev.name, dev.online, busy, video, gpu->gpu_clock_speed, gpu->mem_used, gpu->mem_total, gpu->pwr_usage, gpu->pwr_max_usage,
+					gpu->temp.back(), gpu->temp_max, gpu->temp_mem, gpu->fan_rpm, dev.engines.size(), first_ticks.first, first_ticks.second);
+			}
+		}
+
+		struct Card { string dir, driver, slot, id; };
+
+		//? Intel DRM cards on this machine, in PCI slot order: {sysfs card dir, driver, PCI slot, device id}
+		static vector<Card> find_cards() {
+			vector<Card> cards;
+			std::error_code ec;
+			for (const auto& node : fs::directory_iterator("/sys/class/drm", ec)) {
+				const auto name = node.path().filename().string();
+				if (not name.starts_with("card") or name.find('-') != string::npos) continue;
+				if (Xe::read_str(node.path() / "device" / "vendor") != "0x8086") continue;
+				std::error_code link_ec;
+				Card c;
+				c.dir = node.path().string();
+				c.driver = fs::read_symlink(node.path() / "device" / "driver", link_ec).filename().string();
+				c.slot = fs::canonical(node.path() / "device", link_ec).filename().string();
+				c.id = Xe::read_str(node.path() / "device" / "device");
+				cards.push_back(c);
+			}
+			std::ranges::sort(cards, {}, &Card::slot);
+			return cards;
+		}
+
+		//? The i915 device: the existing Arrow Lake path, bound to the card found by slot. false leaves it out; xe devices carry on.
+		static bool init_i915(const Card& card, string& name) {
+			char *gpu_device_name = get_intel_device_name(card.id.c_str());
 			if (!gpu_device_name) {
 				Logger::warning("Failed to find Intel GPU device name in internal database");
 			}
-
-			free(gpu_device_id);
+			name = gpu_device_name ? string(gpu_device_name) : "Intel GPU";
+			free(gpu_device_name);
 
 			engines = discover_engines(device);
 			if (!engines) {
-				Logger::debug("Failed to find Intel GPU engines, Intel GPUs will not be detected");
+				Logger::debug("Failed to find Intel GPU engines, the i915 GPU will not be detected");
 				return false;
 			}
 
 			int ret = pmu_init(engines);
 			if (ret) {
 				Logger::warning("Intel GPU: Failed to initialize PMU");
+				free_engines(engines);
+				engines = nullptr;
 				return false;
 			}
 
@@ -2178,22 +2454,47 @@ namespace Gpu {
 			}
 
 			npu_dir = Npu::find_dir();
+			return true;
+		}
 
-			device_count = 1;
+		bool init() {
+			if (initialized) return false;
 
-			gpus.resize(gpus.size() + device_count);
-			gpu_names.resize(gpus.size() + device_count);
-
-			if (gpu_device_name) {
-				gpu_names[Nvml::device_count + Rsmi::device_count] = string(gpu_device_name);
-			} else {
-				gpu_names[Nvml::device_count + Rsmi::device_count] = "Intel GPU";
+			const auto cards = find_cards();
+			if (cards.empty()) {
+				Logger::debug("Failed to find an Intel GPU sysfs path, Intel GPUs will not be detected");
+				return false;
 			}
 
-			free(gpu_device_name);
+			vector<string> names;
+			for (const auto& card : cards) {
+				string name;
+				if (card.driver == "i915" and not i915_present) {
+					i915_present = init_i915(card, name);
+					if (i915_present) names.push_back(name);
+				} else if (card.driver == "xe") {
+					Xe::Dev dev;
+					dev.slot = card.slot;
+					dev.card = card.dir;
+					dev.name = Xe::device_name(card.dir, card.id);
+					if (Xe::open_dev(dev)) {
+						names.push_back(dev.name);
+						Xe::devs.push_back(std::move(dev));
+					} else {
+						Logger::warning("Intel xe {}: not monitored, see the lines above", card.slot);
+					}
+				}
+			}
+			device_count = names.size();
+			if (device_count == 0) return false;
+
+			const auto first = Nvml::device_count + Rsmi::device_count;
+			gpus.resize(gpus.size() + device_count);
+			gpu_names.resize(gpus.size() + device_count);
+			for (uint32_t i = 0; i < device_count; i++) gpu_names[first + i] = names[i];
 
 			initialized = true;
-			Intel::collect<1>(gpus.data() + Nvml::device_count + Rsmi::device_count);
+			Intel::collect<1>(gpus.data() + first);
 
 			return true;
 		}
@@ -2204,11 +2505,24 @@ namespace Gpu {
 				free_engines(engines);
 				engines = nullptr;
 			}
+			for (auto& dev : Xe::devs) Xe::close_dev(dev);
+			Xe::devs.clear();
+			i915_present = false;
 			initialized = false;
 			return true;
 		}
 
+		template <bool is_init> static bool collect_i915(gpu_info* gpus_slice);
+
+		//? One slice entry per monitored device: the i915 GPU first, then each xe device in PCI slot order
 		template <bool is_init> bool collect(gpu_info* gpus_slice) {
+			if (!initialized) return false;
+			if (i915_present) collect_i915<is_init>(gpus_slice++);
+			for (auto& dev : Xe::devs) Xe::collect<is_init>(dev, gpus_slice++);
+			return true;
+		}
+
+		template <bool is_init> static bool collect_i915(gpu_info* gpus_slice) {
 			if (!initialized) return false;
 
 			if constexpr(is_init) {

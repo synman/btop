@@ -174,6 +174,10 @@ namespace Gpu {
 		long long encoder_utilization = 0;
 		long long decoder_utilization = 0;
 
+		//? Read by the Intel xe collector, not drawn yet: fan speed (rpm) and memory temperature (C); -1 = none
+		long long fan_rpm = -1;
+		long long temp_mem = -1;
+
 		//? NPU beside an Intel iGPU; npu_online drops while the driver is reloaded and the counter files are gone
 		bool npu_online = false;
 		long long npu_utilization = 0; // %
