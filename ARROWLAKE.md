@@ -5,7 +5,7 @@ Arrow Lake integrated GPU show up properly, and it fixes the layout when two GPU
 Everything else is upstream. Other i915 GPUs take the same code paths, but only Arrow Lake was tested.
 For btop itself, read [README.md](README.md).
 
-The version string reads `1.4.7+arrowlake.12`. The `+arrowlake.N` part is semver build metadata.
+The version string reads `1.4.7+arrowlake.13`. The `+arrowlake.N` part is semver build metadata.
 It counts our builds and does not change upstream's version.
 
 ## What it changes
@@ -37,15 +37,22 @@ gets its own GPU box after the i915 one. The vendored `src/linux/intel_gpu_top/`
 | Memory | VRAM used and total from the xe device query on the render node |
 | Power | Card energy counter `energy1_input` in hwmon, as a change over time; the scale is `power1_cap` |
 | Temperature | The `pkg` sensor in hwmon, scaled to its `crit` limit |
+| FAN, VRAM temperature | One `FAN` row: the fan speed in rpm, then the `VRAM` temperature graph and degrees in the same cells as the GPU row's temperature graph. A sensor with no reading leaves its field blank. One blank row under the stats keeps the box as tall as the iGPU and RTX boxes |
 | TX / RX, MEM, NPU | Not shown, there is no source for them on xe |
-
-The collector also reads the VRAM temperature and the fan speed. They are kept in `gpu_info` and logged at debug level,
-and no box draws them yet.
 
 Layout, in `src/btop_draw.cpp`:
 
-- When every box would still be at least twice the minimum width, GPU boxes sit side by side.
-  They then take one row of height instead of one row per GPU.
+- GPU boxes sit side by side when every box keeps a full 41-column stats box, its two borders and a graph of at
+  least 8 cells, which is 51 columns per box. At 192 columns that holds for two and for three boxes. Each box then
+  takes one row of height instead of one row per GPU. The stats box stays 41 columns and the graph takes the
+  remainder (21 cells for three boxes at 192). Two boxes on a terminal 102 to 163 columns wide now share a row too,
+  where the old rule asked for 82 columns each and stacked them.
+- The minimum terminal height counts boxes in one row once, by their tallest, not as a stack, so three GPU boxes
+  no longer report "Terminal size too small" at 192x49. A terminal under 153 columns with three boxes still stacks
+  them and needs 60 rows.
+- A GPU name that does not fit beside the clock is cut at the last word that fits, not mid-word.
+- For three boxes in one row add `gpu2` (the B70) to `shown_boxes`. Without it the B70 gets a summary line in the CPU
+  box instead, and that box and every box below it move down one row.
 - The CPU box grows until every core fits. Before this, a 192x49 screen with two GPUs showed 18
   of 24 cores. The boxes below give up the rows but never shrink under their minimums.
 - Smaller fixes: the rows each core column can hold, the x position of the GPU graph, and the
