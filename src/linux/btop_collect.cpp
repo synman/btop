@@ -2156,6 +2156,8 @@ namespace Gpu {
 				bool online = false, vram = false, has_video = false;
 				bool engines_primed = false;
 				long long prev_uj = -1, prev_us = 0;
+				long long fan_last = -1; //? last fan reading shown; one lone 0 or failed read after a real value is held over
+				bool fan_held = false;
 				uint64_t retry_at = 0; //? ms; an offline device is rescanned from here on
 			};
 			vector<Dev> devs;
@@ -2381,11 +2383,20 @@ namespace Gpu {
 					dev.prev_us = us;
 					gpu->temp.push_back(max(0ll, hwmon_temp(dev, "pkg")));
 					gpu->temp_mem.push_back(max(0ll, hwmon_temp(dev, "vram")));
-					gpu->fan_rpm = read_ll(dev.hwmon / "fan1_input");
+					//? fan1_input sometimes fails with EAGAIN or reads 0 between real values. Hold the last real value
+					//? over one such sample; a second one in a row is shown, so a fan that really stops reads 0 one sample late
+					const long long rpm = read_ll(dev.hwmon / "fan1_input");
+					if (rpm > 0 or dev.fan_last <= 0 or dev.fan_held) {
+						dev.fan_last = rpm;
+						dev.fan_held = false;
+					} else dev.fan_held = true;
+					gpu->fan_rpm = dev.fan_last;
 				} else {
 					gpu->temp.push_back(0);
 					gpu->temp_mem.push_back(0);
 					gpu->fan_rpm = -1;
+					dev.fan_last = -1;
+					dev.fan_held = false;
 				}
 				gpu->pwr_usage = (long long)round(pwr * 1000);
 				if (gpu->pwr_usage > gpu->pwr_max_usage) gpu->pwr_max_usage = gpu->pwr_usage;

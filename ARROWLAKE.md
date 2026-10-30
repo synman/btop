@@ -1,11 +1,11 @@
 # btop 1.4.7+arrowlake
 
-This branch is upstream btop v1.4.7 plus one code commit, and this notes file. It makes the Intel
+This branch is upstream btop v1.4.7 plus a series of code commits, and this notes file. It makes the Intel
 Arrow Lake integrated GPU show up properly, and it fixes the layout when two GPUs are shown.
 Everything else is upstream. Other i915 GPUs take the same code paths, but only Arrow Lake was tested.
 For btop itself, read [README.md](README.md).
 
-The version string reads `1.4.7+arrowlake.13`. The `+arrowlake.N` part is semver build metadata.
+The version string reads `1.4.7+arrowlake.14`. The `+arrowlake.N` part is semver build metadata.
 It counts our builds and does not change upstream's version.
 
 ## What it changes
@@ -37,7 +37,7 @@ gets its own GPU box after the i915 one. The vendored `src/linux/intel_gpu_top/`
 | Memory | VRAM used and total from the xe device query on the render node |
 | Power | Card energy counter `energy1_input` in hwmon, as a change over time; the scale is `power1_cap` |
 | Temperature | The `pkg` sensor in hwmon, scaled to its `crit` limit |
-| FAN, VRAM temperature | One `FAN` row: the fan speed in rpm, then the `VRAM` temperature graph and degrees in the same cells as the GPU row's temperature graph. A sensor with no reading leaves its field blank. One blank row under the stats keeps the box as tall as the iGPU and RTX boxes |
+| FAN, VRAM temperature | One `FAN` row: the fan speed in rpm, then the `VRAM` temperature graph and degrees in the same cells as the GPU row's temperature graph. A sensor with no reading leaves its field blank. `fan1_input` sometimes fails with `EAGAIN` or reads 0 between real values, so one such sample after a real value is held over; a second in a row is shown, so a stopped fan reads 0 one sample late. One blank row under the stats keeps the box as tall as the iGPU and RTX boxes |
 | TX / RX, MEM, NPU | Not shown, there is no source for them on xe |
 
 Layout, in `src/btop_draw.cpp`:
@@ -135,7 +135,7 @@ build ran on Debian 13 with `build-essential` (g++ 14) in a `debian:trixie-slim`
 
 ## Keeping it current
 
-The code change is five commits on top of the v1.4.7 tag: Arrow Lake support, the NPU row, the MEM row, the refresh-interval flash, then the `+`/`-` key fix.
+The code change is eight commits on top of the v1.4.7 tag: Arrow Lake support, the NPU row, the MEM row, the refresh-interval flash, the `+`/`-` key fix, the Intel xe GPU box, three GPU boxes in one row with the xe FAN row, then the fan read hold.
 This file and the README banner come in later commits that touch no code. To move to a newer
 upstream release, rebase the branch onto the new tag and rebuild. Check two things after a rebase:
 
