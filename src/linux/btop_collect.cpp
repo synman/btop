@@ -2159,8 +2159,7 @@ namespace Gpu {
 				long long prev_uj = -1, prev_us = 0;
 				long long fan_last = -1; //? last fan reading shown; one lone 0 or failed read after a real value is held over
 				int fan_misses = 0;      //? failed or zero reads in a row since the last real value
-				long long mem_mbps = -1;   //? GDDR6 data rate from oc/mem_speed in Mbps; -1 until a read gives one
-				uint64_t mem_read_at = 0;  //? ms; the next oc/mem_speed read, once a minute since each read is a PCODE mailbox command
+				fs::path oc_hwmon; //? the patched xe's "xe_oc" hwmon; freq1_input is the cached VRAM clock in Hz, free to read
 				uint64_t retry_at = 0; //? ms; an offline device is rescanned from here on
 			};
 			vector<Dev> devs;
@@ -2271,8 +2270,12 @@ namespace Gpu {
 				if (not dev.vram) Logger::debug("Intel xe {}: VRAM query failed, memory not shown", dev.slot);
 
 				dev.hwmon.clear();
-				for (const auto& h : fs::directory_iterator(dev.pci / "hwmon", ec))
-					if (read_str(h.path() / "name") == "xe") dev.hwmon = h.path();
+				dev.oc_hwmon.clear();
+				for (const auto& h : fs::directory_iterator(dev.pci / "hwmon", ec)) {
+					const string hw_name = read_str(h.path() / "name");
+					if (hw_name == "xe") dev.hwmon = h.path();
+					else if (hw_name == "xe_oc") dev.oc_hwmon = h.path();
+				}
 
 				if (not open_engines(dev)) { close_dev(dev); return false; }
 				string inventory;
@@ -2293,19 +2296,6 @@ namespace Gpu {
 				return -1;
 			}
 
-			//? oc/mem_speed exists only with the patched xe (xe_gt_oc). A read failing with EPROTO means nothing was staged since
-			//? boot, so the card runs its 19000 Mbps default; any other failure keeps the last value.
-			static long long read_mem_mbps(const Dev& dev, long long last) {
-				const int fd = open((dev.pci / "tile0/gt0/oc/mem_speed").c_str(), O_RDONLY | O_CLOEXEC);
-				if (fd < 0) return last;
-				char buf[32] = {};
-				const ssize_t n = read(fd, buf, sizeof(buf) - 1);
-				const int err = errno;
-				close(fd);
-				if (n > 0) { const long long v = atoll(buf); return v > 0 ? v : last; }
-				return (n < 0 and err == EPROTO) ? 19000 : last;
-			}
-
 			static string device_name(const string& card_dir, const string& id) {
 				if (id == "0xe223") return "Intel Arc Pro B70";
 				if (char* n = get_intel_device_name(id.c_str())) { string s(n); free(n); return s; }
@@ -2318,7 +2308,7 @@ namespace Gpu {
 				const uint64_t now_ms = Tools::time_ms();
 				if constexpr (is_init) {
 					gpu->supported_functions = {
-						.gpu_utilization = true, .mem_utilization = false, .gpu_clock = true, .mem_clock = fs::exists(dev.pci / "tile0/gt0/oc/mem_speed"),
+						.gpu_utilization = true, .mem_utilization = false, .gpu_clock = true, .mem_clock = not dev.oc_hwmon.empty() and read_ll(dev.oc_hwmon / "freq1_input") > 0,
 						.pwr_usage = not dev.hwmon.empty() and read_ll(dev.hwmon / "energy1_input") >= 0,
 						.pwr_state = false,
 						.temp_info = hwmon_temp(dev, "pkg") >= 0,
@@ -2381,11 +2371,8 @@ namespace Gpu {
 					long long clk = read_ll(dev.pci / "tile0/gt0/freq0/act_freq");
 					if (clk < 0) clk = read_ll(dev.pci / "tile0/gt0/freq0/cur_freq");
 					gpu->gpu_clock_speed = (unsigned int)max(0ll, clk);
-					if (gpu->supported_functions.mem_clock and now_ms >= dev.mem_read_at) {
-						dev.mem_mbps = read_mem_mbps(dev, dev.mem_mbps);
-						dev.mem_read_at = now_ms + 60'000;
-					}
-					gpu->mem_clock_speed = dev.mem_mbps > 0 ? dev.mem_mbps / 8 : 0; //? Mbps to the MHz clock btop and vendor tools show (19000 -> 2375)
+					const long long mclk_hz = gpu->supported_functions.mem_clock ? read_ll(dev.oc_hwmon / "freq1_input") : -1;
+					gpu->mem_clock_speed = mclk_hz > 0 ? (unsigned int)(mclk_hz / 1'000'000) : 0; //? Hz to the MHz btop shows (2625000000 -> 2625)
 				} else {
 					gpu->gpu_clock_speed = 0;
 					gpu->mem_used = 0;

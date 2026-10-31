@@ -5,7 +5,7 @@ Arrow Lake integrated GPU show up properly, and it fixes the layout when two GPU
 Everything else is upstream. Other i915 GPUs take the same code paths, but only Arrow Lake was tested.
 For btop itself, read [README.md](README.md).
 
-The version string reads `1.4.7+arrowlake.16`. The `+arrowlake.N` part is semver build metadata.
+The version string reads `1.4.7+arrowlake.17`. The `+arrowlake.N` part is semver build metadata.
 It counts our builds and does not change upstream's version.
 
 ## What it changes
@@ -38,7 +38,7 @@ gets its own GPU box after the i915 one. The vendored `src/linux/intel_gpu_top/`
 | Power | Card energy counter `energy1_input` in hwmon, as a change over time; the scale is `power1_cap` |
 | Temperature | The `pkg` sensor in hwmon, scaled to its `crit` limit |
 | FAN, VRAM temperature | One `FAN` row: the fan speed in rpm, then the `VRAM` temperature graph and degrees in the same cells as the GPU row's temperature graph. A sensor with no reading leaves its field blank. `fan1_input` fails with `EAGAIN` or reads 0 when read again too soon, by btop or another reader, so up to 3 such samples in a row after a real value are held over; the 4th is shown, so a stopped fan reads 0 three samples late. One blank row under the stats keeps the box as tall as the iGPU and RTX boxes |
-| VRAM clock | The memory clock in MHz, the GDDR6 data rate from the patched xe's `oc/mem_speed` divided by 8 (19000 Mbps reads 2375 MHz). Each read is a PCODE mailbox command, so it is read once a minute. A read failing with `EPROTO` means nothing was staged since boot and shows the 19000 default. With stock xe the file is absent and the field is hidden |
+| VRAM clock | The memory clock in MHz, from the patched xe's `xe_oc` hwmon device: `freq1_input` in Hz, labelled `mclk` like amdgpu. The driver caches the rate at probe and on every committed `oc/mem_speed` write, so btop reads it every update at no cost and never issues a PCODE mailbox command. With stock xe the device is absent and the field is hidden |
 | TX / RX, MEM, NPU | Not shown, there is no source for them on xe |
 
 Layout, in `src/btop_draw.cpp`:
@@ -136,7 +136,7 @@ build ran on Debian 13 with `build-essential` (g++ 14) in a `debian:trixie-slim`
 
 ## Keeping it current
 
-The code change is nine commits on top of the v1.4.7 tag: Arrow Lake support, the NPU row, the MEM row, the refresh-interval flash, the `+`/`-` key fix, the Intel xe GPU box, three GPU boxes in one row with the xe FAN row, then the fan read hold, then the VRAM clock.
+The code change is ten commits on top of the v1.4.7 tag: Arrow Lake support, the NPU row, the MEM row, the refresh-interval flash, the `+`/`-` key fix, the Intel xe GPU box, three GPU boxes in one row with the xe FAN row, then the fan read hold, then the VRAM clock, then its move to the `xe_oc` hwmon.
 This file and the README banner come in later commits that touch no code. To move to a newer
 upstream release, rebase the branch onto the new tag and rebuild. Check two things after a rebase:
 
