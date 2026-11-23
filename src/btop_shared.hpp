@@ -111,6 +111,10 @@ namespace Gpu {
 	extern int width, total_height, min_width, min_graph_width, min_height;
 	//? True when `n` boxes share one row at this terminal width: each keeps its full-width stats box, its two borders and a graph of min_graph_width cells
 	bool side_by_side_fits(int term_width, int n);
+	//? Position in `panels` of the gpu_beside_cpu box, or -1 when it is unset, not shown, the cpu box is hidden, or the
+	//? other boxes do not fit side by side in one row
+	int beside_cpu_slot(const vector<int>& panels, int term_width, bool cpu_shown);
+	extern int beside;
 	extern vector<int> x_vec, y_vec;
 	extern vector<bool> redraw;
 	extern int shown;

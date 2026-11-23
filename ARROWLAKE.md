@@ -5,7 +5,7 @@ Arrow Lake integrated GPU show up properly, and it fixes the layout when two GPU
 Everything else is upstream. Other i915 GPUs take the same code paths, but only Arrow Lake was tested.
 For btop itself, read [README.md](README.md).
 
-The version string reads `1.4.7+arrowlake.17`. The `+arrowlake.N` part is semver build metadata.
+The version string reads `1.4.7+arrowlake.18`. The `+arrowlake.N` part is semver build metadata.
 It counts our builds and does not change upstream's version.
 
 ## What it changes
@@ -54,6 +54,12 @@ Layout, in `src/btop_draw.cpp`:
 - A GPU name that does not fit beside the clock is cut at the last word that fits, not mid-word.
 - For three boxes in one row add `gpu2` (the B70) to `shown_boxes`. Without it the B70 gets a summary line in the CPU
   box instead, and that box and every box below it move down one row.
+- `gpu_beside_cpu`, a new config key, draws one GPU box in the CPU box's row, for a fourth GPU. Four boxes in one
+  row get 48 columns at 192, under the 51 they need, so they would stack. Set it to the box, for example `"gpu2"`
+  for the iGPU when two NVIDIA cards come first. The CPU box then narrows by one GPU column, and the other GPU
+  boxes share the row below. At 192 columns with four GPUs, the CPU box is 128 columns and every GPU box is 64.
+  The CPU row grows to that box's stats list if it needs to. The key does nothing when the box is not in
+  `shown_boxes`, the CPU box is hidden, or the other boxes would not fit side by side.
 - The CPU box grows until every core fits. Before this, a 192x49 screen with two GPUs showed 18
   of 24 cores. The boxes below give up the rows but never shrink under their minimums.
 - Smaller fixes: the rows each core column can hold, the x position of the GPU graph, and the

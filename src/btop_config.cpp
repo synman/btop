@@ -246,6 +246,8 @@ namespace Config {
 		{"custom_gpu_name3",	"#* Custom gpu3 model name, empty string to disable."},
 		{"custom_gpu_name4",	"#* Custom gpu4 model name, empty string to disable."},
 		{"custom_gpu_name5",	"#* Custom gpu5 model name, empty string to disable."},
+		{"gpu_beside_cpu",		"#* GPU box to draw beside the cpu box in its row, e.g. \"gpu3\"; the cpu box narrows by one GPU column.\n"
+								"#* Applies when that box is in shown_boxes and the other shown GPU boxes fit side by side. Empty string to disable."},
 	#endif
 	};
 
@@ -287,6 +289,7 @@ namespace Config {
 		{"custom_gpu_name3", ""},
 		{"custom_gpu_name4", ""},
 		{"custom_gpu_name5", ""},
+		{"gpu_beside_cpu", ""},
 		{"show_gpu_info", "Auto"},
 		{"shown_gpus", "nvidia amd intel apple"}
 	#endif

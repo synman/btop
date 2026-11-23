@@ -1035,6 +1035,19 @@ namespace Gpu {
 		return n > 1 and term_width / n >= min_width + 2 + min_graph_width;
 	}
 
+	int beside = -1; //? position in shown_panels of the box drawn in the cpu box's row, -1 for none
+
+	int beside_cpu_slot(const vector<int>& panels, int term_width, bool cpu_shown) {
+		const string& want = Config::getS("gpu_beside_cpu");
+		const int rest = (int)panels.size() - 1;
+		if (not cpu_shown or want.size() != 4 or not want.starts_with("gpu") or not isdigit(want.back())) return -1;
+		//? The box beside the cpu box is one column of the GPU row below it, so both rows share one box width
+		if (not side_by_side_fits(term_width, rest) or term_width - term_width / rest < Cpu::min_width) return -1;
+		for (int i = 0; i < (int)panels.size(); i++)
+			if (panels[i] == want.back() - '0') return i;
+		return -1;
+	}
+
 	//? A GPU name that fits the title bubble beside the clock bubble: whole when it fits, else cut at the last word boundary
 	//? within the budget; only a single word longer than the budget is cut mid-word
 	static string fit_name(const string& name, size_t budget) {
@@ -2356,15 +2369,18 @@ namespace Draw {
 			}
 		}
 		Gpu::shown = Gpu::shown_panels.size();
+		//? gpu_beside_cpu: one GPU box moves into the cpu box's row, so only the rest cost a row of height
+		Gpu::beside = Gpu::beside_cpu_slot(Gpu::shown_panels, Term::width, Cpu::shown);
 
 		// Calculate the minimum possible GPU height, store in total_height
 		// The actual total_height value will of course be overwritten later
 		Gpu::total_height = 0;
 		//? Side by side when every box still gets twice the minimum width: the GPU boxes then cost one row of
 		//? height instead of one per GPU, and the rows go to the boxes below them, the CPU box first
-		Gpu::side_by_side = Gpu::side_by_side_fits(Term::width, Gpu::shown);
+		Gpu::side_by_side = Gpu::beside >= 0 or Gpu::side_by_side_fits(Term::width, Gpu::shown);
 		for (int i = 0; i < Gpu::shown; i++) {
 			using namespace Gpu;
+			if (i == beside) continue;
 			if (side_by_side) total_height = max(total_height, 4 + gpu_b_height_offsets[shown_panels[i]]);
 			else total_height += 4 + gpu_b_height_offsets[shown_panels[i]];
 		}
@@ -2386,6 +2402,7 @@ namespace Draw {
             const bool show_temp = (Config::getB("check_temp") and got_sensors);
 			width = round((double)Term::width * width_p / 100);
 		#ifdef GPU_SUPPORT
+			if (Gpu::beside >= 0) width = Term::width - Term::width / (Gpu::shown - 1);
 			if (Gpu::shown != 0 and not (Mem::shown or Net::shown or Proc::shown)) {
 				height = Term::height - Gpu::total_height - gpus_extra_height;
 			} else {
@@ -2402,6 +2419,8 @@ namespace Draw {
 										  (Mem::shown ? Mem::min_height : 0) + (Net::shown ? Net::min_height : 0));
 				height = max(height, min(needed, Term::height - Gpu::total_height - lower_min));
 			}
+			//? The box beside shares this row's height, so the row is at least as tall as that box's stats list
+			if (Gpu::beside >= 0) height = max(height, 4 + Gpu::gpu_b_height_offsets[Gpu::shown_panels[Gpu::beside]]);
 		#else
 			height = max(8, (int)ceil((double)Term::height * (trim(boxes) == "cpu" ? 100 : height_p) / 100));
 		#endif
@@ -2477,12 +2496,17 @@ namespace Draw {
 			redraw.resize(shown);
 			//? Side by side, every box takes the height of the tallest stats list so the row lines up
 			const int min_total_height = total_height;
+			const int row_n = shown - (beside >= 0);
 			total_height = 0;
 			for (auto i = 0; i < shown; ++i) {
 				redraw[i] = true;
 				int height = 0;
-				width = side_by_side ? Term::width / shown : (int)Term::width;
-				if (Cpu::shown)
+				width = side_by_side ? Term::width / row_n : (int)Term::width;
+				const bool by_cpu = i == beside;
+				const int col = i - (beside >= 0 and i > beside);
+				if (by_cpu)
+					height = Cpu::height;
+				else if (Cpu::shown)
 					if (not (Mem::shown or Net::shown or Proc::shown))
 						height = min_height;
 					else height = side_by_side ? min_total_height : (int)Cpu::height; //? side by side: the stats height, the rest stays below
@@ -2493,13 +2517,15 @@ namespace Draw {
 						height = max(min_height, (int)ceil((double)Term::height * height_p/Gpu::shown / 100));
 
 				b_height_vec[i] = gpu_b_height_offsets[shown_panels[i]] + 2;
-				height += (height+Cpu::height == Term::height-1);
-				height = max(height, side_by_side ? min_total_height : b_height_vec[i] + 2);
-				x_vec[i] = side_by_side ? 1 + i * width : 1;
-				y_vec[i] = 1 + (side_by_side ? 0 : total_height) + (not Config::getB("cpu_bottom"))*Cpu::shown*Cpu::height;
+				if (not by_cpu) {
+					height += (height+Cpu::height == Term::height-1);
+					height = max(height, side_by_side ? min_total_height : b_height_vec[i] + 2);
+				}
+				x_vec[i] = by_cpu ? Term::width - width + 1 : side_by_side ? 1 + col * width : 1;
+				y_vec[i] = by_cpu ? Cpu::y : 1 + (side_by_side ? 0 : total_height) + (not Config::getB("cpu_bottom"))*Cpu::shown*Cpu::height;
 				box[i] = createBox(x_vec[i], y_vec[i], width, height, Theme::c("cpu_box"), true, std::string("gpu") + (char)(shown_panels[i]+'0'), "", (shown_panels[i]+5)%10); // TODO gpu_box
 				b_width = clamp(width/2, min_width, 65);
-				total_height = side_by_side ? max(total_height, height) : total_height + height;
+				if (not by_cpu) total_height = side_by_side ? max(total_height, height) : total_height + height;
 
 				//? Main statistics box
 				b_x_vec[i] = x_vec[i] + width - b_width - 1;

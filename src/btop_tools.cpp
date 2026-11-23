@@ -123,9 +123,10 @@ namespace Term {
         bool proc = boxes.find("proc") != string::npos;
 	#ifdef GPU_SUPPORT
 		int gpu = 0;
+		vector<int> panels;
         if (Gpu::count > 0)
         	for (char i = '0'; i <= '5'; i++)
-        		gpu += (boxes.contains("gpu"s + i) ? 1 : 0);
+        		if (boxes.contains("gpu"s + i)) { gpu++; panels.push_back(i - '0'); }
 	#endif
         int width = 0;
 		if (mem) width = Mem::min_width;
@@ -141,11 +142,15 @@ namespace Term {
 		else height += (mem ? Mem::min_height : 0) + (net ? Net::min_height : 0);
 	#ifdef GPU_SUPPORT
 		//? Boxes that share one row cost the tallest box once, the same rule calcSizes applies
-		const bool gpu_row = Gpu::side_by_side_fits(Term::width, gpu);
+		//? A gpu_beside_cpu box shares the cpu box's row: it costs only what it needs beyond the cpu box's minimum
+		const int beside = Gpu::beside_cpu_slot(panels, Term::width, cpu);
+		const bool gpu_row = beside >= 0 or Gpu::side_by_side_fits(Term::width, gpu);
 		int gpu_tallest = 0;
 		for (int i = 0; i < gpu; i++) {
-			if (gpu_row) gpu_tallest = max(gpu_tallest, Gpu::gpu_b_height_offsets[i] + 4);
-			else height += Gpu::gpu_b_height_offsets[i] + 4;
+			const int box_h = Gpu::gpu_b_height_offsets[panels[i]] + 4;
+			if (i == beside) height += max(0, box_h - Cpu::min_height);
+			else if (gpu_row) gpu_tallest = max(gpu_tallest, box_h);
+			else height += box_h;
 		}
 		height += gpu_tallest;
 	#endif
