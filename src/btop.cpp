@@ -94,7 +94,7 @@ namespace Global {
 		{"#801414", "██████╔╝   ██║   ╚██████╔╝██║        ╚═╝    ╚═╝"},
 		{"#000000", "╚═════╝    ╚═╝    ╚═════╝ ╚═╝"},
 	};
-	const string Version = "1.4.7+arrowlake.18";
+	const string Version = "1.4.7+arrowlake.19";
 
 	int coreCount;
 	string overlay;
@@ -160,11 +160,31 @@ void term_resize(bool force) {
 		sleep_ms(100);
 		if (Term::width < minWidth or Term::height < minHeight) {
 			int width = Term::width, height = Term::height;
+			//? The GPU boxes stack into fewer rows on a wider terminal, so the height needed depends on the width.
+			//? Say what fixes it: the height at this width, the width at this height, or else the least height any
+			//? width can reach and the narrowest width that reaches it.
+			vector<string> needs;
+			if (width >= minWidth) needs.push_back(fmt::format("Height = {} at this width", minHeight));
+			int fit_width = -1, best_height = 1 << 30, best_width = -1;
+			for (int w = minWidth; w <= 1000; w++) {
+				const auto [w_need, h_need] = Term::get_min_size(boxes, w);
+				if (w_need > w) continue;
+				if (h_need <= height and fit_width < 0) fit_width = w;
+				if (h_need < best_height) { best_height = h_need; best_width = w; }
+			}
+			const string lead = needs.empty() ? "" : "or ";
+			if (fit_width > 0)
+				needs.push_back(fmt::format("{}Width = {} at this height", lead, fit_width));
+			else if (best_width > 0 and (width < minWidth or best_height < minHeight))
+				needs.push_back(fmt::format("{}Height = {} at Width = {}", lead, best_height, best_width));
+			string need_lines;
+			for (size_t i = 0; i < needs.size(); i++)
+				need_lines += Mv::to((height / 2) + 2 + (int)i, std::max(1, (width - (int)needs[i].size()) / 2)) + needs[i];
 			cout << fmt::format("{clear}{bg_black}{fg_white}"
 					"{mv1}Terminal size too small:"
 					"{mv2} Width = {fg_width}{width} {fg_white}Height = {fg_height}{height}"
 					"{mv3}{fg_white}Needed for current config:"
-					"{mv4}Width = {minWidth} Height = {minHeight}",
+					"{need_lines}",
 					"clear"_a = Term::clear, "bg_black"_a = Global::bg_black, "fg_white"_a = Global::fg_white,
 					"mv1"_a = Mv::to((height / 2) - 2, (width / 2) - 11),
 					"mv2"_a = Mv::to((height / 2) - 1, (width / 2) - 10),
@@ -173,9 +193,7 @@ void term_resize(bool force) {
 						"fg_height"_a = (height < minHeight ? Global::fg_red : Global::fg_green),
 						"height"_a = height,
 					"mv3"_a = Mv::to((height / 2) + 1, (width / 2) - 12),
-					"mv4"_a = Mv::to((height / 2) + 2, (width / 2) - 10),
-						"minWidth"_a = minWidth,
-						"minHeight"_a = minHeight
+					"need_lines"_a = need_lines
 			) << std::flush;
 
 			bool got_key = false;

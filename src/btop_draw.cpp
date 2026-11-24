@@ -1012,8 +1012,10 @@ namespace Gpu {
 	int min_width = 41, min_height = 8;
 	int min_graph_width = 8; //? narrowest graph (cells) a box in a shared row may have
 	int width = 41, total_height;
-	bool side_by_side = false; //? GPU boxes in one row, each a 1/shown-wide column, instead of stacked
+	bool side_by_side = false; //? GPU boxes in a grid of rows, several to a row, instead of one box per row
+	int cols = 1, rows = 0; //? the grid below the cpu box: boxes per full row and row count; cols 1 is one box per row
 	vector<int> x_vec = {}, y_vec = {}, b_height_vec = {};
+	vector<int> w_vec = {}, b_w_vec = {}; //? per box: a short last grid row gives its boxes more width
 	int b_width;
 	vector<int> b_x_vec = {}, b_y_vec = {};
 	vector<bool> redraw = {};
@@ -1033,6 +1035,27 @@ namespace Gpu {
 
 	bool side_by_side_fits(int term_width, int n) {
 		return n > 1 and term_width / n >= min_width + 2 + min_graph_width;
+	}
+
+	int grid_cols(int term_width, int n) {
+		//? As many boxes to a row as keep each at its minimum width plus a graph, then balanced so the last row is not
+		//? left nearly empty: 3 boxes in 150 columns make rows of 2 and 1, 4 boxes with room for 3 make 2 rows of 2
+		if (n < 2) return 1;
+		const int fit = min(n, term_width / (min_width + 2 + min_graph_width));
+		if (fit < 2) return 1;
+		const int grid_rows = (n + fit - 1) / fit;
+		return (n + grid_rows - 1) / grid_rows;
+	}
+
+	int grid_min_height(const vector<int>& panels, int skip, int grid_cols) {
+		//? Each row costs its tallest stats list once; cols 1 is one box per row, so every box costs its own
+		int total = 0, tallest = 0, j = 0;
+		for (int i = 0; i < (int)panels.size(); i++) {
+			if (i == skip) continue;
+			tallest = max(tallest, 4 + gpu_b_height_offsets[panels[i]]);
+			if (++j % grid_cols == 0) { total += tallest; tallest = 0; }
+		}
+		return total + tallest;
 	}
 
 	int beside = -1; //? position in shown_panels of the box drawn in the cpu box's row, -1 for none
@@ -1099,6 +1122,7 @@ namespace Gpu {
 		auto& graph_bg = Symbols::graph_symbols.at((graph_symbol == "default" ? Config::getS("graph_symbol") + "_up" : graph_symbol + "_up")).at(6);
         auto single_graph = !Config::getB("gpu_mirror_graph");
 		string out;
+		const int width = w_vec[index], b_width = b_w_vec[index]; //? boxes in a short last grid row are wider
 		int height = gpu_b_height_offsets[index] + 4;
 		out.reserve(width * height);
 
@@ -2375,14 +2399,16 @@ namespace Draw {
 		// Calculate the minimum possible GPU height, store in total_height
 		// The actual total_height value will of course be overwritten later
 		Gpu::total_height = 0;
-		//? Side by side when every box still gets twice the minimum width: the GPU boxes then cost one row of
-		//? height instead of one per GPU, and the rows go to the boxes below them, the CPU box first
-		Gpu::side_by_side = Gpu::beside >= 0 or Gpu::side_by_side_fits(Term::width, Gpu::shown);
-		for (int i = 0; i < Gpu::shown; i++) {
+		//? The GPU boxes go in a grid with as many to a row as still get their minimum width plus a graph: each row
+		//? costs one box of height instead of one per GPU, and the rows saved go to the boxes below, the CPU box first.
+		//? With gpu_beside_cpu the rest are known to fit in one row.
+		{
 			using namespace Gpu;
-			if (i == beside) continue;
-			if (side_by_side) total_height = max(total_height, 4 + gpu_b_height_offsets[shown_panels[i]]);
-			else total_height += 4 + gpu_b_height_offsets[shown_panels[i]];
+			const int row_n = shown - (beside >= 0);
+			cols = beside >= 0 ? row_n : grid_cols(Term::width, shown);
+			rows = (row_n + cols - 1) / cols;
+			side_by_side = cols > 1;
+			total_height = grid_min_height(shown_panels, beside, cols);
 		}
 	#endif
 		Mem::shown = boxes.contains("mem");
@@ -2406,7 +2432,7 @@ namespace Draw {
 			if (Gpu::shown != 0 and not (Mem::shown or Net::shown or Proc::shown)) {
 				height = Term::height - Gpu::total_height - gpus_extra_height;
 			} else {
-				height = max(8, (int)ceil((double)Term::height * (trim(boxes) == "cpu" ? 100 : height_p/((Gpu::side_by_side ? 1 : Gpu::shown)+1) + (Gpu::shown != 0)*5) / 100));
+				height = max(8, (int)ceil((double)Term::height * (trim(boxes) == "cpu" ? 100 : height_p/(Gpu::rows+1) + (Gpu::shown != 0)*5) / 100));
 			}
 			if (height <= Term::height-gpus_extra_height) height += gpus_extra_height;
 			{
@@ -2494,22 +2520,31 @@ namespace Draw {
 			npu_meter_vec.resize(shown);
 			membw_meter_vec.resize(shown);
 			redraw.resize(shown);
-			//? Side by side, every box takes the height of the tallest stats list so the row lines up
-			const int min_total_height = total_height;
+			w_vec.resize(shown); b_w_vec.resize(shown);
+			//? In the grid, every box in a row takes the height of the row's tallest stats list so the row lines up
 			const int row_n = shown - (beside >= 0);
+			vector<int> row_min(max(1, rows), 0);
+			for (int i = 0, j = 0; i < shown; i++) {
+				if (i == beside) continue;
+				int& tallest = row_min[j++ / cols];
+				tallest = max(tallest, 4 + gpu_b_height_offsets[shown_panels[i]]);
+			}
+			int row_y = 0, row_h = 0; //? top of the current grid row below the cpu box, and that row's height so far
 			total_height = 0;
 			for (auto i = 0; i < shown; ++i) {
 				redraw[i] = true;
 				int height = 0;
-				width = side_by_side ? Term::width / row_n : (int)Term::width;
 				const bool by_cpu = i == beside;
-				const int col = i - (beside >= 0 and i > beside);
+				const int j = i - (beside >= 0 and i > beside); //? position among the grid boxes
+				const int r = j / cols, c = j % cols;
+				const int in_row = min(cols, row_n - r * cols); //? a short last row splits the full width among fewer boxes
+				width = by_cpu ? Term::width / cols : side_by_side ? Term::width / in_row : (int)Term::width;
 				if (by_cpu)
 					height = Cpu::height;
 				else if (Cpu::shown)
 					if (not (Mem::shown or Net::shown or Proc::shown))
 						height = min_height;
-					else height = side_by_side ? min_total_height : (int)Cpu::height; //? side by side: the stats height, the rest stays below
+					else height = side_by_side ? row_min[r] : (int)Cpu::height; //? in the grid: the row's stats height, the rest stays below
 				else
 					if (not (Mem::shown or Net::shown or Proc::shown))
 						height = (Term::height - total_height) / (Gpu::shown - i) + (i == 0) * ((Term::height - total_height) % (Gpu::shown - i));
@@ -2519,13 +2554,18 @@ namespace Draw {
 				b_height_vec[i] = gpu_b_height_offsets[shown_panels[i]] + 2;
 				if (not by_cpu) {
 					height += (height+Cpu::height == Term::height-1);
-					height = max(height, side_by_side ? min_total_height : b_height_vec[i] + 2);
+					height = max(height, side_by_side ? row_min[r] : b_height_vec[i] + 2);
+					if (side_by_side and c == 0) { row_y += row_h; row_h = 0; } //? a new grid row starts below the last
 				}
-				x_vec[i] = by_cpu ? Term::width - width + 1 : side_by_side ? 1 + col * width : 1;
-				y_vec[i] = by_cpu ? Cpu::y : 1 + (side_by_side ? 0 : total_height) + (not Config::getB("cpu_bottom"))*Cpu::shown*Cpu::height;
+				x_vec[i] = by_cpu ? Term::width - width + 1 : side_by_side ? 1 + c * width : 1;
+				y_vec[i] = by_cpu ? Cpu::y : 1 + (side_by_side ? row_y : total_height) + (not Config::getB("cpu_bottom"))*Cpu::shown*Cpu::height;
 				box[i] = createBox(x_vec[i], y_vec[i], width, height, Theme::c("cpu_box"), true, std::string("gpu") + (char)(shown_panels[i]+'0'), "", (shown_panels[i]+5)%10); // TODO gpu_box
 				b_width = clamp(width/2, min_width, 65);
-				if (not by_cpu) total_height = side_by_side ? max(total_height, height) : total_height + height;
+				w_vec[i] = width; b_w_vec[i] = b_width;
+				if (not by_cpu) {
+					if (side_by_side) { row_h = max(row_h, height); total_height = row_y + row_h; }
+					else total_height += height;
+				}
 
 				//? Main statistics box
 				b_x_vec[i] = x_vec[i] + width - b_width - 1;
